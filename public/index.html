@@ -62,6 +62,10 @@
                 <input id="max-uses" type="number" min="1" value="1">
               </label>
               <label class="wide">
+                Script URL
+                <input id="script-url" type="url" required placeholder="https://example.com/main.lua">
+              </label>
+              <label class="wide">
                 Notes
                 <input id="notes" type="text" maxlength="500" placeholder="Optional">
               </label>
@@ -83,20 +87,6 @@
               </label>
               <button type="submit">Reset Binding</button>
             </form>
-            <form id="blacklist-form" class="stacked-form separated">
-              <label>
-                Device ID
-                <input id="blacklist-device" type="text" placeholder="Device ID to blacklist">
-              </label>
-              <label>
-                Reason
-                <input id="blacklist-reason" type="text" maxlength="500" placeholder="Reason">
-              </label>
-              <div class="button-row">
-                <button type="submit" class="danger">Blacklist</button>
-                <button id="unblacklist-device" type="button" class="secondary">Unblacklist</button>
-              </div>
-            </form>
             <output id="device-result" class="result-box is-hidden"></output>
           </article>
         </section>
@@ -105,20 +95,20 @@
           <div class="section-head">
             <div>
               <h2>Client Integration</h2>
-              <p class="muted-text">Validate a key from your own app, then enable your app's licensed features after a successful response.</p>
+              <p class="muted-text">Give users the generated loadstring. It downloads the loader, validates the key, then runs the script URL attached to that key.</p>
             </div>
           </div>
           <div class="snippet-grid">
             <article class="snippet-card">
               <div class="snippet-head">
-                <strong>HTTP Request</strong>
+                <strong>Loadstring Format</strong>
                 <button type="button" class="secondary" data-copy-snippet="curl-snippet">Copy</button>
               </div>
               <pre><code id="curl-snippet"></code></pre>
             </article>
             <article class="snippet-card">
               <div class="snippet-head">
-                <strong>JavaScript Client</strong>
+                <strong>Loader Endpoint</strong>
                 <button type="button" class="secondary" data-copy-snippet="js-snippet">Copy</button>
               </div>
               <pre><code id="js-snippet"></code></pre>
@@ -129,7 +119,7 @@
         <section class="panel keys-panel">
           <div class="section-head">
             <h2>Keys</h2>
-            <input id="key-filter" type="search" placeholder="Filter keys or notes">
+            <input id="key-filter" type="search" placeholder="Filter keys, IPs, URLs, or notes">
           </div>
           <div class="table-wrap">
             <table>
@@ -138,7 +128,9 @@
                   <th>Key</th>
                   <th>Status</th>
                   <th>Devices</th>
+                  <th>Execution IPs</th>
                   <th>Expires</th>
+                  <th>Script URL</th>
                   <th>Notes</th>
                   <th></th>
                 </tr>
