@@ -14,6 +14,37 @@ function showResult(element, message, isError = false) {
   element.classList.toggle("error", isError);
 }
 
+function showGeneratedKey(element, data) {
+  element.classList.remove("is-hidden", "error");
+  element.innerHTML = `
+    <div class="generated-summary">
+      <div>
+        <span>Key</span>
+        <strong class="key-code">${escapeHtml(data.key)}</strong>
+      </div>
+      <div>
+        <span>Expires</span>
+        <strong>${formatDate(data.expiresAt)}</strong>
+      </div>
+      <div>
+        <span>Max devices</span>
+        <strong>${data.maxUses}</strong>
+      </div>
+      <div>
+        <span>Script URL</span>
+        <strong class="url-value" title="${escapeHtml(data.scriptUrl || "")}">${escapeHtml(data.scriptUrl || "Not set")}</strong>
+      </div>
+    </div>
+    <div class="generated-code">
+      <div class="snippet-head">
+        <strong>Loadstring</strong>
+        <button type="button" class="secondary" data-copy-output="generated-loadstring">Copy</button>
+      </div>
+      <pre><code id="generated-loadstring">${escapeHtml(data.loadstring || "")}</code></pre>
+    </div>
+  `;
+}
+
 async function api(path, body = {}) {
   const response = await fetch(path, {
     method: "POST",
@@ -31,6 +62,32 @@ async function api(path, body = {}) {
   return data;
 }
 
+async function copyText(value) {
+  const text = String(value || "");
+
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+
+  const copied = document.execCommand("copy");
+  textarea.remove();
+
+  if (!copied) {
+    throw new Error("Copy failed. Select the text and copy it manually.");
+  }
+}
+
 function formatDate(value) {
   if (!value) return "Never";
   const date = new Date(value);
@@ -39,6 +96,7 @@ function formatDate(value) {
 
 function getKeyStatus(key) {
   if (!key.is_active) return { label: "Inactive", className: "status-inactive" };
+  if (Number(key.blacklisted_count || 0) > 0) return { label: "Blacklisted", className: "status-expired" };
   if (key.expired) return { label: "Expired", className: "status-expired" };
   if (key.used_count > 0) return { label: "Bound", className: "status-used" };
   return { label: "Active", className: "status-active" };
@@ -58,31 +116,43 @@ function renderKeys() {
   const filteredKeys = keys.filter((key) => {
     return !filter ||
       key.key.toLowerCase().includes(filter) ||
+      (key.execution_ips || []).join(" ").toLowerCase().includes(filter) ||
+      String(key.script_url || "").toLowerCase().includes(filter) ||
       String(key.notes || "").toLowerCase().includes(filter);
   });
 
   if (!filteredKeys.length) {
     const row = document.createElement("tr");
-    row.innerHTML = '<td colspan="6">No keys found.</td>';
+    row.innerHTML = '<td colspan="8">No keys found.</td>';
     table.appendChild(row);
     return;
   }
 
   for (const key of filteredKeys) {
     const status = getKeyStatus(key);
+    const isBlacklisted = Number(key.blacklisted_count || 0) > 0;
+    const executionIps = key.execution_ips && key.execution_ips.length
+      ? key.execution_ips.map((ip) => `<span>${escapeHtml(ip)}</span>`).join("")
+      : '<span class="muted-inline">No executions</span>';
     const row = document.createElement("tr");
     row.innerHTML = `
-      <td><span class="key-code">${key.key}</span></td>
-      <td><span class="status-pill ${status.className}">${status.label}</span></td>
-      <td>${key.used_count}/${key.max_uses}</td>
+      <td><span class="key-code">${escapeHtml(key.key)}</span></td>
+      <td><span class="status-pill ${status.className}">${escapeHtml(status.label)}</span></td>
+      <td>${Number(key.used_count || 0)}/${Number(key.max_uses || key.max_devices || 1)}</td>
+      <td><div class="ip-list">${executionIps}</div></td>
       <td>${formatDate(key.expires_at)}</td>
+      <td><span class="url-cell" title="${escapeHtml(key.script_url || "")}">${escapeHtml(key.script_url || "Not set")}</span></td>
       <td>${escapeHtml(key.notes || "")}</td>
-      <td>
+      <td class="actions-cell">
         <div class="row-actions">
-          <button type="button" class="secondary" data-copy="${key.key}">Copy</button>
-          <button type="button" class="${key.is_active ? "danger" : ""}" data-toggle="${key.key}" data-active="${key.is_active ? "0" : "1"}">
+          <button type="button" class="secondary" data-copy-loadstring="${escapeHtml(key.key)}">Copy</button>
+          <button type="button" class="${key.is_active ? "danger" : ""}" data-toggle="${escapeHtml(key.key)}" data-active="${key.is_active ? "0" : "1"}">
             ${key.is_active ? "Disable" : "Enable"}
           </button>
+          <button type="button" class="${isBlacklisted ? "secondary" : "danger"}" data-blacklist-toggle="${escapeHtml(key.key)}" data-blacklisted="${isBlacklisted ? "1" : "0"}">
+            ${isBlacklisted ? "Unblacklist" : "Blacklist"}
+          </button>
+          <button type="button" class="danger" data-delete="${escapeHtml(key.key)}">Remove</button>
         </div>
       </td>
     `;
@@ -100,33 +170,21 @@ function escapeHtml(value) {
 }
 
 function renderIntegrationSnippets() {
-  const apiUrl = `${window.location.origin}/api/validate-key`;
-  const payload = {
-    key: "KEY-ABCD-EFGH-JKLM-NPQR",
-    deviceId: "device-id-from-your-app",
-    userId: "optional-user-id",
-  };
+  const loaderUrl = `${window.location.origin}/api/loader`;
 
-  $("curl-snippet").textContent = [
-    `curl -X POST "${apiUrl}" \\`,
-    '  -H "Content-Type: application/json" \\',
-    `  -d '${JSON.stringify(payload)}'`,
+  $("curl-snippet").textContent = `script_key="KEY-ABCD-EFGH-JKLM-NPQR"; loadstring(game:HttpGet("${loaderUrl}", true))()`;
+
+  $("js-snippet").textContent = [
+    `GET  ${loaderUrl}`,
+    "Returns the Lua loader used by the loadstring.",
+    "",
+    `POST ${loaderUrl}`,
+    "Validates { key, hwid, userId } and returns { success, script } when authorized.",
   ].join("\n");
+}
 
-  $("js-snippet").textContent = `async function validateLicense(key, deviceId, userId) {
-  const response = await fetch("${apiUrl}", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ key, deviceId, userId }),
-  });
-
-  const data = await response.json();
-  if (!response.ok || !data.success) {
-    throw new Error(data.message || "License validation failed");
-  }
-
-  return data;
-}`;
+function buildLoadstring(key) {
+  return `script_key="${key}"; loadstring(game:HttpGet("${window.location.origin}/api/loader", true))()`;
 }
 
 async function loadAllKeys() {
@@ -170,9 +228,10 @@ $("generate-form").addEventListener("submit", async (event) => {
     const data = await api("/api/generate-key", {
       expiresInDays: Number($("expires-in").value || 0),
       maxUses: Number($("max-uses").value || 1),
+      scriptUrl: $("script-url").value.trim(),
       notes: $("notes").value.trim(),
     });
-    showResult(output, `Generated ${data.key} | Expires: ${formatDate(data.expiresAt)} | Max devices: ${data.maxUses}`);
+    showGeneratedKey(output, data);
     await loadAllKeys();
   } catch (error) {
     showResult(output, error.message, true);
@@ -195,55 +254,70 @@ $("reset-form").addEventListener("submit", async (event) => {
   }
 });
 
-$("blacklist-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const output = $("device-result");
-
-  try {
-    const data = await api("/api/blacklist-hwid", {
-      deviceId: $("blacklist-device").value.trim(),
-      reason: $("blacklist-reason").value.trim(),
-    });
-    showResult(output, data.message);
-    await loadAllKeys();
-  } catch (error) {
-    showResult(output, error.message, true);
-  }
-});
-
-$("unblacklist-device").addEventListener("click", async () => {
-  const output = $("device-result");
-
-  try {
-    const data = await api("/api/unblacklist-hwid", {
-      deviceId: $("blacklist-device").value.trim(),
-    });
-    showResult(output, `${data.message}. Updated rows: ${data.changed}`);
-  } catch (error) {
-    showResult(output, error.message, true);
-  }
-});
-
 $("key-filter").addEventListener("input", renderKeys);
 
 $("keys-table").addEventListener("click", async (event) => {
-  const copyKey = event.target.dataset.copy;
-  const toggleKey = event.target.dataset.toggle;
+  const button = event.target.closest("button");
+  if (!button) return;
 
-  if (copyKey) {
-    await navigator.clipboard.writeText(copyKey);
-    event.target.textContent = "Copied";
-    setTimeout(() => {
-      event.target.textContent = "Copy";
-    }, 900);
+  const copyLoadstringKey = button.dataset.copyLoadstring;
+  const toggleKey = button.dataset.toggle;
+  const blacklistToggleKey = button.dataset.blacklistToggle;
+  const deleteKey = button.dataset.delete;
+
+  if (copyLoadstringKey) {
+    try {
+      await copyText(buildLoadstring(copyLoadstringKey));
+      button.textContent = "Copied";
+      setTimeout(() => {
+        button.textContent = "Copy";
+      }, 900);
+    } catch (error) {
+      alert(error.message);
+    }
+    return;
   }
 
   if (toggleKey) {
     try {
       await api("/api/toggle-key", {
         key: toggleKey,
-        isActive: event.target.dataset.active === "1",
+        isActive: button.dataset.active === "1",
       });
+      await loadAllKeys();
+    } catch (error) {
+      alert(error.message);
+    }
+    return;
+  }
+
+  if (blacklistToggleKey) {
+    const isBlacklisted = button.dataset.blacklisted === "1";
+    const confirmed = window.confirm(
+      isBlacklisted
+        ? `Unblacklist devices registered to ${blacklistToggleKey}?`
+        : `Blacklist devices registered to ${blacklistToggleKey}?`
+    );
+    if (!confirmed) return;
+
+    try {
+      const data = await api(isBlacklisted ? "/api/unblacklist-key-devices" : "/api/blacklist-key-devices", {
+        key: blacklistToggleKey,
+      });
+      showResult($("device-result"), `${data.message}. Updated rows: ${data.changed}`);
+      await loadAllKeys();
+    } catch (error) {
+      showResult($("device-result"), error.message, true);
+    }
+    return;
+  }
+
+  if (deleteKey) {
+    const confirmed = window.confirm(`Remove ${deleteKey}? This also removes its device bindings.`);
+    if (!confirmed) return;
+
+    try {
+      await api("/api/delete-key", { key: deleteKey });
       await loadAllKeys();
     } catch (error) {
       alert(error.message);
@@ -252,15 +326,23 @@ $("keys-table").addEventListener("click", async (event) => {
 });
 
 document.addEventListener("click", async (event) => {
-  const snippetId = event.target.dataset.copySnippet;
-  if (!snippetId) return;
+  const button = event.target.closest("button");
+  if (!button) return;
 
-  const snippet = $(snippetId).textContent;
-  await navigator.clipboard.writeText(snippet);
-  event.target.textContent = "Copied";
-  setTimeout(() => {
-    event.target.textContent = "Copy";
-  }, 900);
+  const snippetId = button.dataset.copySnippet;
+  const outputId = button.dataset.copyOutput;
+  if (!snippetId && !outputId) return;
+
+  const snippet = $(snippetId || outputId).textContent;
+  try {
+    await copyText(snippet);
+    button.textContent = "Copied";
+    setTimeout(() => {
+      button.textContent = "Copy";
+    }, 900);
+  } catch (error) {
+    alert(error.message);
+  }
 });
 
 renderIntegrationSnippets();
