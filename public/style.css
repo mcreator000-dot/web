@@ -244,8 +244,67 @@ h2 {
   margin-bottom: 14px;
 }
 
+.muted-text {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 .section-head input {
   max-width: 280px;
+}
+
+.integration-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.snippet-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.snippet-card {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0e1218;
+  overflow: hidden;
+}
+
+.snippet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  padding: 10px 12px;
+}
+
+.snippet-head strong {
+  font-size: 0.9rem;
+}
+
+.snippet-head button {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 0.8rem;
+}
+
+pre {
+  margin: 0;
+  max-height: 300px;
+  overflow: auto;
+  padding: 14px;
+}
+
+code {
+  color: #dbeafe;
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 0.84rem;
+  line-height: 1.55;
+  white-space: pre;
 }
 
 .table-wrap {
@@ -339,6 +398,10 @@ td {
   .workspace-grid,
   .stats-grid,
   .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .snippet-grid {
     grid-template-columns: 1fr;
   }
 

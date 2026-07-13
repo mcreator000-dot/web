@@ -4,6 +4,8 @@ Node.js and Express license-key backend with a small admin dashboard.
 
 It uses SQLite for local development. On Vercel, set `DATABASE_URL` and it will use Postgres instead.
 
+This service validates licenses and binds them to device identifiers. It does not fetch or execute remote client code; after validation succeeds, your own app should unlock the licensed features it already contains.
+
 ## Setup
 
 ```bash
@@ -85,3 +87,24 @@ Use a device identifier that your own app is allowed to collect. The backend sto
 ```
 
 Successful responses return `status: "activated"` for a first use on a device and `status: "validated"` for later checks.
+
+## Client Integration Example
+
+```js
+async function validateLicense(key, deviceId, userId) {
+  const response = await fetch("https://your-project.vercel.app/api/validate-key", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key, deviceId, userId }),
+  });
+
+  const data = await response.json();
+  if (!response.ok || !data.success) {
+    throw new Error(data.message || "License validation failed");
+  }
+
+  return data;
+}
+```
+
+Use the returned success response as an authorization signal inside your own application. Keep privileged logic server-side when possible, and do not put secrets in distributed clients.

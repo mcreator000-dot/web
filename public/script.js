@@ -99,6 +99,36 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function renderIntegrationSnippets() {
+  const apiUrl = `${window.location.origin}/api/validate-key`;
+  const payload = {
+    key: "KEY-ABCD-EFGH-JKLM-NPQR",
+    deviceId: "device-id-from-your-app",
+    userId: "optional-user-id",
+  };
+
+  $("curl-snippet").textContent = [
+    `curl -X POST "${apiUrl}" \\`,
+    '  -H "Content-Type: application/json" \\',
+    `  -d '${JSON.stringify(payload)}'`,
+  ].join("\n");
+
+  $("js-snippet").textContent = `async function validateLicense(key, deviceId, userId) {
+  const response = await fetch("${apiUrl}", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key, deviceId, userId }),
+  });
+
+  const data = await response.json();
+  if (!response.ok || !data.success) {
+    throw new Error(data.message || "License validation failed");
+  }
+
+  return data;
+}`;
+}
+
 async function loadAllKeys() {
   const data = await api("/api/all-keys");
   keys = data.data || [];
@@ -220,6 +250,20 @@ $("keys-table").addEventListener("click", async (event) => {
     }
   }
 });
+
+document.addEventListener("click", async (event) => {
+  const snippetId = event.target.dataset.copySnippet;
+  if (!snippetId) return;
+
+  const snippet = $(snippetId).textContent;
+  await navigator.clipboard.writeText(snippet);
+  event.target.textContent = "Copied";
+  setTimeout(() => {
+    event.target.textContent = "Copy";
+  }, 900);
+});
+
+renderIntegrationSnippets();
 
 if (adminToken) {
   $("admin-token").value = adminToken;
