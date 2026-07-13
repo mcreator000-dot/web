@@ -351,7 +351,7 @@ app.post("/api/validate-key", asyncHandler(async (req, res) => {
      DO UPDATE SET active = 1,
                    user_id = excluded.user_id,
                    last_validated_at = CURRENT_TIMESTAMP,
-                   validation_count = validation_count + 1`,
+                   validation_count = key_devices.validation_count + 1`,
     [keyRow.id, deviceHash, userId]
   );
   await logUsage({ keyCode, deviceHash, userId, ip, action: "KEY_ACTIVATED" });

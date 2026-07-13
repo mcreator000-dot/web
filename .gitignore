@@ -3,3 +3,6 @@ keys.db
 keys.db-*
 .env
 npm-debug.log*
+
+.vercel
+.env*
