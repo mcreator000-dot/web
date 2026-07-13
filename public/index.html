@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Key System Manager</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <section id="login-view" class="login-panel">
+        <div>
+          <p class="eyebrow">Admin</p>
+          <h1>Key System Manager</h1>
+        </div>
+        <form id="login-form" class="login-form">
+          <label for="admin-token">Admin token</label>
+          <div class="inline-form">
+            <input id="admin-token" name="admin-token" type="password" autocomplete="current-password" placeholder="Enter token">
+            <button type="submit">Login</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="dashboard-view" class="dashboard is-hidden">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Dashboard</p>
+            <h1>Key System Manager</h1>
+          </div>
+          <div class="topbar-actions">
+            <button id="refresh-keys" type="button">Refresh</button>
+            <button id="logout" type="button" class="secondary">Logout</button>
+          </div>
+        </header>
+
+        <section class="stats-grid" aria-label="Key statistics">
+          <article class="stat-card">
+            <span>Total Keys</span>
+            <strong id="stat-total">0</strong>
+          </article>
+          <article class="stat-card">
+            <span>Active</span>
+            <strong id="stat-active">0</strong>
+          </article>
+          <article class="stat-card">
+            <span>Bound Devices</span>
+            <strong id="stat-bound">0</strong>
+          </article>
+        </section>
+
+        <section class="workspace-grid">
+          <article class="panel">
+            <h2>Generate Key</h2>
+            <form id="generate-form" class="form-grid">
+              <label>
+                Expires in days
+                <input id="expires-in" type="number" min="0" value="30">
+              </label>
+              <label>
+                Max devices
+                <input id="max-uses" type="number" min="1" value="1">
+              </label>
+              <label class="wide">
+                Notes
+                <input id="notes" type="text" maxlength="500" placeholder="Optional">
+              </label>
+              <button type="submit">Generate</button>
+            </form>
+            <output id="generated-key" class="result-box is-hidden"></output>
+          </article>
+
+          <article class="panel">
+            <h2>Device Controls</h2>
+            <form id="reset-form" class="stacked-form">
+              <label>
+                Key
+                <input id="reset-key" type="text" placeholder="KEY-XXXX-XXXX-XXXX-XXXX">
+              </label>
+              <label>
+                Device ID
+                <input id="reset-device" type="text" placeholder="Optional, blank resets all devices">
+              </label>
+              <button type="submit">Reset Binding</button>
+            </form>
+            <form id="blacklist-form" class="stacked-form separated">
+              <label>
+                Device ID
+                <input id="blacklist-device" type="text" placeholder="Device ID to blacklist">
+              </label>
+              <label>
+                Reason
+                <input id="blacklist-reason" type="text" maxlength="500" placeholder="Reason">
+              </label>
+              <div class="button-row">
+                <button type="submit" class="danger">Blacklist</button>
+                <button id="unblacklist-device" type="button" class="secondary">Unblacklist</button>
+              </div>
+            </form>
+            <output id="device-result" class="result-box is-hidden"></output>
+          </article>
+        </section>
+
+        <section class="panel keys-panel">
+          <div class="section-head">
+            <h2>Keys</h2>
+            <input id="key-filter" type="search" placeholder="Filter keys or notes">
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Key</th>
+                  <th>Status</th>
+                  <th>Devices</th>
+                  <th>Expires</th>
+                  <th>Notes</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="keys-table"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="script.js"></script>
+  </body>
+</html>
