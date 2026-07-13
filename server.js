@@ -1,544 +1,313 @@
-require("dotenv").config();
+let adminToken = sessionStorage.getItem("keySystemAdminToken") || "";
+let keys = [];
 
-const crypto = require("crypto");
-const path = require("path");
-const cors = require("cors");
-const express = require("express");
-const helmet = require("helmet");
-const rateLimit = require("express-rate-limit");
+const $ = (id) => document.getElementById(id);
 
-const app = express();
-const PORT = Number(process.env.PORT || 3000);
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "dev-admin-token";
-const DEVICE_HASH_SECRET = process.env.DEVICE_HASH_SECRET || "dev-device-secret";
-const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
-const DATABASE_URL = process.env.DATABASE_URL;
-const USE_POSTGRES = Boolean(DATABASE_URL);
-let dbReady;
-let sqliteDb;
-let pgPool;
-
-if (ADMIN_TOKEN === "dev-admin-token") {
-  console.warn("ADMIN_TOKEN is not set. Using development token: dev-admin-token");
+function show(view) {
+  $("login-view").classList.toggle("is-hidden", view !== "login");
+  $("dashboard-view").classList.toggle("is-hidden", view !== "dashboard");
 }
 
-if (DEVICE_HASH_SECRET === "dev-device-secret") {
-  console.warn("DEVICE_HASH_SECRET is not set. Set it before production use.");
+function showResult(element, message, isError = false) {
+  element.textContent = message;
+  element.classList.remove("is-hidden");
+  element.classList.toggle("error", isError);
 }
 
-app.set("trust proxy", 1);
-app.use(helmet({ contentSecurityPolicy: false }));
-app.use(cors({ origin: CORS_ORIGIN === "*" ? true : CORS_ORIGIN }));
-app.use(express.json({ limit: "32kb" }));
-app.use(express.static(path.join(__dirname, "public")));
+function showGeneratedKey(element, data) {
+  element.classList.remove("is-hidden", "error");
+  element.innerHTML = `
+    <div class="generated-summary">
+      <div>
+        <span>Key</span>
+        <strong class="key-code">${escapeHtml(data.key)}</strong>
+      </div>
+      <div>
+        <span>Expires</span>
+        <strong>${formatDate(data.expiresAt)}</strong>
+      </div>
+      <div>
+        <span>Max devices</span>
+        <strong>${data.maxUses}</strong>
+      </div>
+    </div>
+    <div class="generated-code">
+      <div class="snippet-head">
+        <strong>Loadstring</strong>
+        <button type="button" class="secondary" data-copy-output="generated-loadstring">Copy</button>
+      </div>
+      <pre><code id="generated-loadstring">${escapeHtml(data.loadstring || "")}</code></pre>
+    </div>
+  `;
+}
 
-const validateLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  limit: 60,
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-const adminLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  limit: 120,
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-app.use("/api/validate-key", validateLimiter);
-app.use("/api", adminLimiter);
-
-if (USE_POSTGRES) {
-  const { Pool } = require("pg");
-  pgPool = new Pool({
-    connectionString: DATABASE_URL,
-    ssl: process.env.PGSSLMODE === "disable" ? false : { rejectUnauthorized: false },
+async function api(path, body = {}) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Admin-Token": adminToken,
+    },
+    body: JSON.stringify(body),
   });
-} else {
-  const sqlite3 = require("sqlite3").verbose();
-  sqliteDb = new sqlite3.Database(path.join(__dirname, "keys.db"));
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.success) {
+    throw new Error(data.message || data.error || `Request failed: ${response.status}`);
+  }
+  return data;
 }
 
-function toPostgresSql(sql) {
-  let index = 0;
-  return sql.replace(/\?/g, () => `$${++index}`);
+function formatDate(value) {
+  if (!value) return "Never";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Never" : date.toLocaleDateString();
 }
 
-function run(sql, params = []) {
-  if (USE_POSTGRES) {
-    return pgPool.query(toPostgresSql(sql), params).then((result) => ({
-      changes: result.rowCount,
-      lastID: result.rows && result.rows[0] ? result.rows[0].id : undefined,
-    }));
+function getKeyStatus(key) {
+  if (!key.is_active) return { label: "Inactive", className: "status-inactive" };
+  if (Number(key.blacklisted_count || 0) > 0) return { label: "Blacklisted", className: "status-expired" };
+  if (key.expired) return { label: "Expired", className: "status-expired" };
+  if (key.used_count > 0) return { label: "Bound", className: "status-used" };
+  return { label: "Active", className: "status-active" };
+}
+
+function renderStats() {
+  $("stat-total").textContent = keys.length;
+  $("stat-active").textContent = keys.filter((key) => key.is_active && !key.expired).length;
+  $("stat-bound").textContent = keys.reduce((total, key) => total + Number(key.used_count || 0), 0);
+}
+
+function renderKeys() {
+  const filter = $("key-filter").value.trim().toLowerCase();
+  const table = $("keys-table");
+  table.innerHTML = "";
+
+  const filteredKeys = keys.filter((key) => {
+    return !filter ||
+      key.key.toLowerCase().includes(filter) ||
+      (key.execution_ips || []).join(" ").toLowerCase().includes(filter) ||
+      String(key.script_url || "").toLowerCase().includes(filter) ||
+      String(key.notes || "").toLowerCase().includes(filter);
+  });
+
+  if (!filteredKeys.length) {
+    const row = document.createElement("tr");
+    row.innerHTML = '<td colspan="8">No keys found.</td>';
+    table.appendChild(row);
+    return;
   }
 
-  return new Promise((resolve, reject) => {
-    sqliteDb.run(sql, params, function onRun(err) {
-      if (err) reject(err);
-      else resolve(this);
+  for (const key of filteredKeys) {
+    const status = getKeyStatus(key);
+    const isBlacklisted = Number(key.blacklisted_count || 0) > 0;
+    const executionIps = key.execution_ips && key.execution_ips.length
+      ? key.execution_ips.map((ip) => `<span>${escapeHtml(ip)}</span>`).join("")
+      : '<span class="muted-inline">No executions</span>';
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td><span class="key-code">${key.key}</span></td>
+      <td><span class="status-pill ${status.className}">${status.label}</span></td>
+      <td>${key.used_count}/${key.max_uses}</td>
+      <td><div class="ip-list">${executionIps}</div></td>
+      <td>${formatDate(key.expires_at)}</td>
+      <td><span class="url-cell" title="${escapeHtml(key.script_url || "")}">${escapeHtml(key.script_url || "Not set")}</span></td>
+      <td>${escapeHtml(key.notes || "")}</td>
+      <td>
+        <div class="row-actions">
+          <button type="button" class="secondary" data-copy-loadstring="${key.key}">Copy Loadstring</button>
+          <button type="button" class="${key.is_active ? "danger" : ""}" data-toggle="${key.key}" data-active="${key.is_active ? "0" : "1"}">
+            ${key.is_active ? "Disable" : "Enable"}
+          </button>
+          <button type="button" class="${isBlacklisted ? "secondary" : "danger"}" data-blacklist-toggle="${key.key}" data-blacklisted="${isBlacklisted ? "1" : "0"}">
+            ${isBlacklisted ? "Unblacklist" : "Blacklist"}
+          </button>
+          <button type="button" class="danger" data-delete="${key.key}">Delete</button>
+        </div>
+      </td>
+    `;
+    table.appendChild(row);
+  }
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function renderIntegrationSnippets() {
+  const loaderUrl = `${window.location.origin}/api/loader`;
+
+  $("curl-snippet").textContent = `script_key="KEY-ABCD-EFGH-JKLM-NPQR"; loadstring(game:HttpGet("${loaderUrl}", true))()`;
+
+  $("js-snippet").textContent = [
+    `GET  ${loaderUrl}`,
+    "Returns the Lua loader used by the loadstring.",
+    "",
+    `POST ${loaderUrl}`,
+    "Validates { key, hwid, userId } and returns { success, script } when authorized.",
+  ].join("\n");
+}
+
+function buildLoadstring(key) {
+  return `script_key="${key}"; loadstring(game:HttpGet("${window.location.origin}/api/loader", true))()`;
+}
+
+async function loadAllKeys() {
+  const data = await api("/api/all-keys");
+  keys = data.data || [];
+  renderStats();
+  renderKeys();
+}
+
+$("login-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  adminToken = $("admin-token").value.trim();
+  if (!adminToken) return;
+
+  try {
+    sessionStorage.setItem("keySystemAdminToken", adminToken);
+    await loadAllKeys();
+    show("dashboard");
+  } catch (error) {
+    sessionStorage.removeItem("keySystemAdminToken");
+    showResult($("generated-key"), error.message, true);
+    alert(error.message);
+  }
+});
+
+$("logout").addEventListener("click", () => {
+  adminToken = "";
+  sessionStorage.removeItem("keySystemAdminToken");
+  show("login");
+});
+
+$("refresh-keys").addEventListener("click", () => {
+  loadAllKeys().catch((error) => alert(error.message));
+});
+
+$("generate-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const output = $("generated-key");
+
+  try {
+    const data = await api("/api/generate-key", {
+      expiresInDays: Number($("expires-in").value || 0),
+      maxUses: Number($("max-uses").value || 1),
+      scriptUrl: $("script-url").value.trim(),
+      notes: $("notes").value.trim(),
     });
-  });
-}
-
-function get(sql, params = []) {
-  if (USE_POSTGRES) {
-    return pgPool.query(toPostgresSql(sql), params).then((result) => result.rows[0] || null);
+    showGeneratedKey(output, data);
+    await loadAllKeys();
+  } catch (error) {
+    showResult(output, error.message, true);
   }
-
-  return new Promise((resolve, reject) => {
-    sqliteDb.get(sql, params, (err, row) => {
-      if (err) reject(err);
-      else resolve(row);
-    });
-  });
-}
-
-function all(sql, params = []) {
-  if (USE_POSTGRES) {
-    return pgPool.query(toPostgresSql(sql), params).then((result) => result.rows);
-  }
-
-  return new Promise((resolve, reject) => {
-    sqliteDb.all(sql, params, (err, rows) => {
-      if (err) reject(err);
-      else resolve(rows);
-    });
-  });
-}
-
-async function initDatabase() {
-  if (!USE_POSTGRES) {
-    await run("PRAGMA foreign_keys = ON");
-  }
-
-  await run(`
-    CREATE TABLE IF NOT EXISTS license_keys (
-      id ${USE_POSTGRES ? "SERIAL PRIMARY KEY" : "INTEGER PRIMARY KEY AUTOINCREMENT"},
-      key_code TEXT UNIQUE NOT NULL,
-      created_at ${USE_POSTGRES ? "TIMESTAMPTZ" : "TEXT"} NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      expires_at ${USE_POSTGRES ? "TIMESTAMPTZ" : "TEXT"},
-      is_active INTEGER NOT NULL DEFAULT 1,
-      max_devices INTEGER NOT NULL DEFAULT 1,
-      notes TEXT NOT NULL DEFAULT ''
-    )
-  `);
-  await run(`
-    CREATE TABLE IF NOT EXISTS key_devices (
-      id ${USE_POSTGRES ? "SERIAL PRIMARY KEY" : "INTEGER PRIMARY KEY AUTOINCREMENT"},
-      key_id INTEGER NOT NULL,
-      device_hash TEXT NOT NULL,
-      user_id TEXT,
-      activated_at ${USE_POSTGRES ? "TIMESTAMPTZ" : "TEXT"} NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      last_validated_at ${USE_POSTGRES ? "TIMESTAMPTZ" : "TEXT"} NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      validation_count INTEGER NOT NULL DEFAULT 1,
-      active INTEGER NOT NULL DEFAULT 1,
-      UNIQUE(key_id, device_hash),
-      FOREIGN KEY(key_id) REFERENCES license_keys(id) ON DELETE CASCADE
-    )
-  `);
-  await run(`
-    CREATE TABLE IF NOT EXISTS device_blacklist (
-      id ${USE_POSTGRES ? "SERIAL PRIMARY KEY" : "INTEGER PRIMARY KEY AUTOINCREMENT"},
-      device_hash TEXT UNIQUE NOT NULL,
-      reason TEXT NOT NULL DEFAULT '',
-      banned_at ${USE_POSTGRES ? "TIMESTAMPTZ" : "TEXT"} NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-  await run(`
-    CREATE TABLE IF NOT EXISTS usage_logs (
-      id ${USE_POSTGRES ? "SERIAL PRIMARY KEY" : "INTEGER PRIMARY KEY AUTOINCREMENT"},
-      key_code TEXT,
-      device_hash TEXT,
-      user_id TEXT,
-      ip TEXT,
-      action TEXT NOT NULL,
-      details TEXT,
-      timestamp ${USE_POSTGRES ? "TIMESTAMPTZ" : "TEXT"} NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-}
-
-function jsonError(res, status, message, code = "error") {
-  return res.status(status).json({ success: false, message, error: message, status: code });
-}
-
-function asyncHandler(handler) {
-  return (req, res, next) => {
-    Promise.resolve(handler(req, res, next)).catch(next);
-  };
-}
-
-function timingSafeEqual(a, b) {
-  const left = Buffer.from(String(a || ""));
-  const right = Buffer.from(String(b || ""));
-  return left.length === right.length && crypto.timingSafeEqual(left, right);
-}
-
-function requireAdmin(req, res, next) {
-  const suppliedToken = req.get("x-admin-token") || req.body.adminToken;
-  if (!timingSafeEqual(suppliedToken, ADMIN_TOKEN)) {
-    return jsonError(res, 403, "Unauthorized", "unauthorized");
-  }
-  return next();
-}
-
-function normalizeKey(value) {
-  return String(value || "").trim().toUpperCase();
-}
-
-function normalizeDeviceId(req) {
-  return String(req.body.deviceId || req.body.hwid || "").trim();
-}
-
-function hashDeviceId(deviceId) {
-  return crypto
-    .createHmac("sha256", DEVICE_HASH_SECRET)
-    .update(deviceId)
-    .digest("hex");
-}
-
-function generateKey() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  const groups = [];
-
-  for (let group = 0; group < 4; group += 1) {
-    let part = "";
-    for (let index = 0; index < 4; index += 1) {
-      part += chars[crypto.randomInt(chars.length)];
-    }
-    groups.push(part);
-  }
-
-  return `KEY-${groups.join("-")}`;
-}
-
-function isUniqueError(error) {
-  const message = String(error && error.message ? error.message : "").toLowerCase();
-  return error && (error.code === "23505" || message.includes("unique") || message.includes("duplicate"));
-}
-
-async function logUsage({ keyCode, deviceHash, userId, ip, action, details }) {
-  await run(
-    `INSERT INTO usage_logs (key_code, device_hash, user_id, ip, action, details)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [keyCode || null, deviceHash || null, userId || null, ip || null, action, details || null]
-  );
-}
-
-async function getActiveDeviceCount(keyId) {
-  const row = await get(
-    "SELECT COUNT(*) AS count FROM key_devices WHERE key_id = ? AND active = 1",
-    [keyId]
-  );
-  return row ? row.count : 0;
-}
-
-function isExpired(keyRow) {
-  return keyRow.expires_at && Date.now() > new Date(keyRow.expires_at).getTime();
-}
-
-app.use((req, res, next) => {
-  if (req.path === "/api/health") {
-    return next();
-  }
-
-  return Promise.resolve(dbReady).then(() => next()).catch(next);
 });
 
-app.get("/api/health", (_req, res) => {
-  res.json({ success: true, status: "ok", database: USE_POSTGRES ? "postgres" : "sqlite" });
+$("reset-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const output = $("device-result");
+
+  try {
+    const data = await api("/api/reset-hwid", {
+      key: $("reset-key").value.trim(),
+      deviceId: $("reset-device").value.trim(),
+    });
+    showResult(output, `${data.message}. Updated rows: ${data.changed}`);
+    await loadAllKeys();
+  } catch (error) {
+    showResult(output, error.message, true);
+  }
 });
 
-app.post("/api/generate-key", requireAdmin, asyncHandler(async (req, res) => {
-  const expiresInDays = Number(req.body.expiresInDays || 0);
-  const maxDevices = Math.max(1, Number(req.body.maxUses || req.body.maxDevices || 1));
-  const notes = String(req.body.notes || "").slice(0, 500);
-  const expiresAt = expiresInDays > 0
-    ? new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString()
-    : null;
+$("key-filter").addEventListener("input", renderKeys);
 
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const keyCode = generateKey();
+$("keys-table").addEventListener("click", async (event) => {
+  const copyLoadstringKey = event.target.dataset.copyLoadstring;
+  const toggleKey = event.target.dataset.toggle;
+  const blacklistToggleKey = event.target.dataset.blacklistToggle;
+  const deleteKey = event.target.dataset.delete;
+
+  if (copyLoadstringKey) {
+    await navigator.clipboard.writeText(buildLoadstring(copyLoadstringKey));
+    event.target.textContent = "Copied";
+    setTimeout(() => {
+      event.target.textContent = "Copy Loadstring";
+    }, 900);
+  }
+
+  if (toggleKey) {
     try {
-      await run(
-        `INSERT INTO license_keys (key_code, expires_at, max_devices, notes)
-         VALUES (?, ?, ?, ?)`,
-        [keyCode, expiresAt, maxDevices, notes]
-      );
-      await logUsage({
-        keyCode,
-        ip: req.ip,
-        action: "KEY_GENERATED",
-        details: JSON.stringify({ maxDevices, expiresAt }),
+      await api("/api/toggle-key", {
+        key: toggleKey,
+        isActive: event.target.dataset.active === "1",
       });
-      return res.json({ success: true, key: keyCode, expiresAt, maxUses: maxDevices });
+      await loadAllKeys();
     } catch (error) {
-      if (!isUniqueError(error)) throw error;
+      alert(error.message);
     }
   }
 
-  return jsonError(res, 500, "Could not generate a unique key", "generation_failed");
-}));
-
-app.post("/api/validate-key", asyncHandler(async (req, res) => {
-  const keyCode = normalizeKey(req.body.key);
-  const deviceId = normalizeDeviceId(req);
-  const userId = req.body.userId ? String(req.body.userId).slice(0, 128) : null;
-
-  if (!keyCode || !deviceId) {
-    return jsonError(res, 400, "Missing key or device ID", "missing_fields");
-  }
-
-  const deviceHash = hashDeviceId(deviceId);
-  const ip = req.ip;
-
-  const blacklisted = await get("SELECT id FROM device_blacklist WHERE device_hash = ?", [deviceHash]);
-  if (blacklisted) {
-    await logUsage({ keyCode, deviceHash, userId, ip, action: "BLACKLISTED_DEVICE" });
-    return jsonError(res, 403, "This device is blacklisted", "blacklisted");
-  }
-
-  const keyRow = await get("SELECT * FROM license_keys WHERE key_code = ?", [keyCode]);
-  if (!keyRow) {
-    await logUsage({ keyCode, deviceHash, userId, ip, action: "INVALID_KEY" });
-    return jsonError(res, 404, "Invalid key", "invalid");
-  }
-
-  if (!keyRow.is_active) {
-    await logUsage({ keyCode, deviceHash, userId, ip, action: "INACTIVE_KEY" });
-    return jsonError(res, 403, "Key is inactive", "inactive");
-  }
-
-  if (isExpired(keyRow)) {
-    await logUsage({ keyCode, deviceHash, userId, ip, action: "EXPIRED_KEY" });
-    return jsonError(res, 403, "Key has expired", "expired");
-  }
-
-  const activation = await get(
-    "SELECT * FROM key_devices WHERE key_id = ? AND device_hash = ? AND active = 1",
-    [keyRow.id, deviceHash]
-  );
-
-  if (activation) {
-    await run(
-      `UPDATE key_devices
-       SET user_id = COALESCE(?, user_id),
-           last_validated_at = CURRENT_TIMESTAMP,
-           validation_count = validation_count + 1
-       WHERE id = ?`,
-      [userId, activation.id]
+  if (blacklistToggleKey) {
+    const isBlacklisted = event.target.dataset.blacklisted === "1";
+    const confirmed = window.confirm(
+      isBlacklisted
+        ? `Unblacklist devices registered to ${blacklistToggleKey}?`
+        : `Blacklist devices registered to ${blacklistToggleKey}?`
     );
-    await logUsage({ keyCode, deviceHash, userId, ip, action: "KEY_VALIDATED" });
-    return res.json({
-      success: true,
-      message: "Key validated successfully",
-      status: "validated",
-      isNew: false,
-    });
+    if (!confirmed) return;
+
+    try {
+      const data = await api(isBlacklisted ? "/api/unblacklist-key-devices" : "/api/blacklist-key-devices", {
+        key: blacklistToggleKey,
+      });
+      showResult($("device-result"), `${data.message}. Updated rows: ${data.changed}`);
+      await loadAllKeys();
+    } catch (error) {
+      showResult($("device-result"), error.message, true);
+    }
   }
 
-  const activeDeviceCount = await getActiveDeviceCount(keyRow.id);
-  if (activeDeviceCount >= keyRow.max_devices) {
-    await logUsage({ keyCode, deviceHash, userId, ip, action: "MAX_DEVICES_REACHED" });
-    return jsonError(res, 403, "Key device limit reached", "max_uses");
+  if (deleteKey) {
+    const confirmed = window.confirm(`Delete ${deleteKey}? This also removes its device bindings.`);
+    if (!confirmed) return;
+
+    try {
+      await api("/api/delete-key", { key: deleteKey });
+      await loadAllKeys();
+    } catch (error) {
+      alert(error.message);
+    }
   }
-
-  await run(
-    `INSERT INTO key_devices (key_id, device_hash, user_id)
-     VALUES (?, ?, ?)
-     ON CONFLICT(key_id, device_hash)
-     DO UPDATE SET active = 1,
-                   user_id = excluded.user_id,
-                   last_validated_at = CURRENT_TIMESTAMP,
-                   validation_count = key_devices.validation_count + 1`,
-    [keyRow.id, deviceHash, userId]
-  );
-  await logUsage({ keyCode, deviceHash, userId, ip, action: "KEY_ACTIVATED" });
-  return res.json({
-    success: true,
-    message: "Key activated successfully",
-    status: "activated",
-    isNew: true,
-  });
-}));
-
-app.post(["/api/reset-hwid", "/api/reset-device"], requireAdmin, asyncHandler(async (req, res) => {
-  const keyCode = normalizeKey(req.body.key);
-  const deviceId = normalizeDeviceId(req);
-
-  if (!keyCode) {
-    return jsonError(res, 400, "Missing key", "missing_key");
-  }
-
-  const keyRow = await get("SELECT * FROM license_keys WHERE key_code = ?", [keyCode]);
-  if (!keyRow) {
-    return jsonError(res, 404, "Key not found", "not_found");
-  }
-
-  let result;
-  if (deviceId) {
-    const deviceHash = hashDeviceId(deviceId);
-    result = await run(
-      "UPDATE key_devices SET active = 0 WHERE key_id = ? AND device_hash = ?",
-      [keyRow.id, deviceHash]
-    );
-    await logUsage({ keyCode, deviceHash, ip: req.ip, action: "DEVICE_RESET" });
-  } else {
-    result = await run("UPDATE key_devices SET active = 0 WHERE key_id = ?", [keyRow.id]);
-    await logUsage({ keyCode, ip: req.ip, action: "ALL_DEVICES_RESET" });
-  }
-
-  return res.json({
-    success: true,
-    message: "Device binding reset successfully",
-    changed: result.changes,
-  });
-}));
-
-app.post(["/api/blacklist-hwid", "/api/blacklist-device"], requireAdmin, asyncHandler(async (req, res) => {
-  const deviceId = normalizeDeviceId(req);
-  const reason = String(req.body.reason || "No reason provided").slice(0, 500);
-
-  if (!deviceId) {
-    return jsonError(res, 400, "Missing device ID", "missing_device");
-  }
-
-  const deviceHash = hashDeviceId(deviceId);
-  await run(
-    `INSERT INTO device_blacklist (device_hash, reason)
-     VALUES (?, ?)
-     ON CONFLICT(device_hash) DO UPDATE SET reason = excluded.reason,
-                                            banned_at = CURRENT_TIMESTAMP`,
-    [deviceHash, reason]
-  );
-  await run("UPDATE key_devices SET active = 0 WHERE device_hash = ?", [deviceHash]);
-  await logUsage({ deviceHash, ip: req.ip, action: "DEVICE_BLACKLISTED", details: reason });
-
-  return res.json({ success: true, message: "Device blacklisted successfully" });
-}));
-
-app.post(["/api/unblacklist-hwid", "/api/unblacklist-device"], requireAdmin, asyncHandler(async (req, res) => {
-  const deviceId = normalizeDeviceId(req);
-
-  if (!deviceId) {
-    return jsonError(res, 400, "Missing device ID", "missing_device");
-  }
-
-  const deviceHash = hashDeviceId(deviceId);
-  const result = await run("DELETE FROM device_blacklist WHERE device_hash = ?", [deviceHash]);
-  await logUsage({ deviceHash, ip: req.ip, action: "DEVICE_UNBLACKLISTED" });
-
-  return res.json({
-    success: true,
-    message: "Device removed from blacklist",
-    changed: result.changes,
-  });
-}));
-
-app.post("/api/key-info", requireAdmin, asyncHandler(async (req, res) => {
-  const keyCode = normalizeKey(req.body.key);
-
-  if (!keyCode) {
-    return jsonError(res, 400, "Missing key", "missing_key");
-  }
-
-  const keyRow = await get(
-    `SELECT lk.*,
-            SUM(CASE WHEN kd.active = 1 THEN 1 ELSE 0 END) AS used_count
-     FROM license_keys lk
-     LEFT JOIN key_devices kd ON kd.key_id = lk.id
-     WHERE lk.key_code = ?
-     GROUP BY lk.id`,
-    [keyCode]
-  );
-
-  if (!keyRow) {
-    return jsonError(res, 404, "Key not found", "not_found");
-  }
-
-  const devices = await all(
-    `SELECT user_id, activated_at, last_validated_at, validation_count, active
-     FROM key_devices
-     WHERE key_id = ?
-     ORDER BY last_validated_at DESC`,
-    [keyRow.id]
-  );
-
-  return res.json({
-    success: true,
-    data: formatKeyRow(keyRow),
-    devices,
-  });
-}));
-
-app.post("/api/all-keys", requireAdmin, asyncHandler(async (_req, res) => {
-  const rows = await all(`
-    SELECT lk.*,
-           SUM(CASE WHEN kd.active = 1 THEN 1 ELSE 0 END) AS used_count
-    FROM license_keys lk
-    LEFT JOIN key_devices kd ON kd.key_id = lk.id
-    GROUP BY lk.id
-    ORDER BY lk.created_at DESC
-  `);
-
-  return res.json({ success: true, data: rows.map(formatKeyRow) });
-}));
-
-app.post("/api/toggle-key", requireAdmin, asyncHandler(async (req, res) => {
-  const keyCode = normalizeKey(req.body.key);
-  const isActive = req.body.isActive ? 1 : 0;
-
-  if (!keyCode) {
-    return jsonError(res, 400, "Missing key", "missing_key");
-  }
-
-  const result = await run("UPDATE license_keys SET is_active = ? WHERE key_code = ?", [isActive, keyCode]);
-  if (!result.changes) {
-    return jsonError(res, 404, "Key not found", "not_found");
-  }
-
-  await logUsage({
-    keyCode,
-    ip: req.ip,
-    action: isActive ? "KEY_ENABLED" : "KEY_DISABLED",
-  });
-
-  return res.json({ success: true, message: isActive ? "Key enabled" : "Key disabled" });
-}));
-
-function formatKeyRow(row) {
-  return {
-    id: row.id,
-    key: row.key_code,
-    created_at: row.created_at,
-    expires_at: row.expires_at,
-    is_active: Boolean(row.is_active),
-    max_uses: row.max_devices,
-    max_devices: row.max_devices,
-    used_count: row.used_count || 0,
-    notes: row.notes || "",
-    expired: isExpired(row),
-  };
-}
-
-app.use((err, _req, res, _next) => {
-  console.error(err);
-  return jsonError(res, 500, "Internal server error", "server_error");
 });
 
-dbReady = initDatabase();
+document.addEventListener("click", async (event) => {
+  const snippetId = event.target.dataset.copySnippet;
+  const outputId = event.target.dataset.copyOutput;
+  if (!snippetId && !outputId) return;
 
-if (require.main === module) {
-  dbReady.then(() => {
-    app.listen(PORT, () => {
-      console.log(`Key system running on http://localhost:${PORT}`);
+  const snippet = $(snippetId || outputId).textContent;
+  await navigator.clipboard.writeText(snippet);
+  event.target.textContent = "Copied";
+  setTimeout(() => {
+    event.target.textContent = "Copy";
+  }, 900);
+});
+
+renderIntegrationSnippets();
+
+if (adminToken) {
+  $("admin-token").value = adminToken;
+  loadAllKeys()
+    .then(() => show("dashboard"))
+    .catch(() => {
+      sessionStorage.removeItem("keySystemAdminToken");
+      show("login");
     });
-  })
-  .catch((error) => {
-    console.error("Failed to initialize database:", error);
-    process.exit(1);
-  });
+} else {
+  show("login");
 }
-
-module.exports = app;
