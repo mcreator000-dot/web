@@ -647,15 +647,20 @@ app.get("/api/health", (_req, res) => {
 });
 
 app.post("/api/generate-key", requireAdmin, asyncHandler(async (req, res) => {
-  const expiresInDays = Number(req.body.expiresInDays || 0);
+  const requestedExpiresIn = req.body.expiresIn !== undefined ? req.body.expiresIn : req.body.expiresInDays;
+  const expiresIn = Math.max(0, Number(requestedExpiresIn || 0));
+  const expiresInUnit = String(req.body.expiresInUnit || (req.body.expiresInHours !== undefined ? "hours" : "days")).toLowerCase();
+  const expiresInHours = req.body.expiresInHours !== undefined
+    ? Math.max(0, Number(req.body.expiresInHours || 0))
+    : expiresIn * (expiresInUnit === "hours" ? 1 : 24);
   const maxDevices = Math.max(1, Number(req.body.maxUses || req.body.maxDevices || 1));
   const notes = String(req.body.notes || "").slice(0, 500);
   const scriptUrl = normalizeScriptUrl(req.body.scriptUrl);
   if (!scriptUrl) {
     return jsonError(res, 400, "Missing script URL", "missing_script_url");
   }
-  const expiresAt = expiresInDays > 0
-    ? new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString()
+  const expiresAt = expiresInHours > 0
+    ? new Date(Date.now() + expiresInHours * 60 * 60 * 1000).toISOString()
     : null;
 
   for (let attempt = 0; attempt < 5; attempt += 1) {

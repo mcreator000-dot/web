@@ -54,8 +54,14 @@
             <h2>Generate Key</h2>
             <form id="generate-form" class="form-grid">
               <label>
-                Expires in days
-                <input id="expires-in" type="number" min="0" value="30">
+                Expires in
+                <div class="duration-control">
+                  <input id="expires-in" type="number" min="0" step="1" value="30">
+                  <select id="expires-unit" aria-label="Expiration unit">
+                    <option value="days" selected>Days</option>
+                    <option value="hours">Hours</option>
+                  </select>
+                </div>
               </label>
               <label>
                 Max devices

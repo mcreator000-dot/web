@@ -24,7 +24,7 @@ function showGeneratedKey(element, data) {
       </div>
       <div>
         <span>Expires</span>
-        <strong>${formatDate(data.expiresAt)}</strong>
+        <strong title="${escapeHtml(formatDate(data.expiresAt))}">${formatExpires(data.expiresAt)}</strong>
       </div>
       <div>
         <span>Max devices</span>
@@ -94,6 +94,27 @@ function formatDate(value) {
   return Number.isNaN(date.getTime()) ? "Never" : date.toLocaleDateString();
 }
 
+function formatExpires(value) {
+  if (!value) return "Never";
+  const expiresAt = new Date(value).getTime();
+  if (Number.isNaN(expiresAt)) return "Never";
+
+  const diffMs = expiresAt - Date.now();
+  if (diffMs <= 0) return "Expired";
+
+  const totalMinutes = Math.ceil(diffMs / 60000);
+  const totalHours = Math.ceil(diffMs / 3600000);
+  const totalDays = Math.ceil(diffMs / 86400000);
+
+  if (totalMinutes < 60) {
+    return `${totalMinutes} min left`;
+  }
+  if (totalHours < 48) {
+    return `${totalHours} hr${totalHours === 1 ? "" : "s"} left`;
+  }
+  return `${totalDays} day${totalDays === 1 ? "" : "s"} left`;
+}
+
 function getKeyStatus(key) {
   if (!key.is_active) return { label: "Inactive", className: "status-inactive" };
   if (Number(key.blacklisted_count || 0) > 0) return { label: "Blacklisted", className: "status-expired" };
@@ -140,7 +161,7 @@ function renderKeys() {
       <td><span class="status-pill ${status.className}">${escapeHtml(status.label)}</span></td>
       <td>${Number(key.used_count || 0)}/${Number(key.max_uses || key.max_devices || 1)}</td>
       <td><div class="ip-list">${executionIps}</div></td>
-      <td>${formatDate(key.expires_at)}</td>
+      <td><span title="${escapeHtml(formatDate(key.expires_at))}">${formatExpires(key.expires_at)}</span></td>
       <td><span class="url-cell" title="${escapeHtml(key.script_url || "")}">${escapeHtml(key.script_url || "Not set")}</span></td>
       <td>${escapeHtml(key.notes || "")}</td>
       <td class="actions-cell">
@@ -226,7 +247,8 @@ $("generate-form").addEventListener("submit", async (event) => {
 
   try {
     const data = await api("/api/generate-key", {
-      expiresInDays: Number($("expires-in").value || 0),
+      expiresIn: Number($("expires-in").value || 0),
+      expiresInUnit: $("expires-unit").value,
       maxUses: Number($("max-uses").value || 1),
       scriptUrl: $("script-url").value.trim(),
       notes: $("notes").value.trim(),
@@ -255,6 +277,12 @@ $("reset-form").addEventListener("submit", async (event) => {
 });
 
 $("key-filter").addEventListener("input", renderKeys);
+
+setInterval(() => {
+  if (!$("dashboard-view").classList.contains("is-hidden")) {
+    renderKeys();
+  }
+}, 60000);
 
 $("keys-table").addEventListener("click", async (event) => {
   const button = event.target.closest("button");
