@@ -709,6 +709,8 @@ app.post("/api/validate-key", asyncHandler(async (req, res) => {
     message: result.isNew ? "Key activated successfully" : "Key validated successfully",
     status: result.statusText,
     isNew: result.isNew,
+    expiresAt: result.keyRow.expires_at,
+    serverTime: new Date().toISOString(),
   });
 }));
 
