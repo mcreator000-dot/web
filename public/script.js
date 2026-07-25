@@ -1,5 +1,6 @@
 let adminToken = sessionStorage.getItem("keySystemAdminToken") || "";
 let keys = [];
+let productName = "Key System Manager";
 
 const $ = (id) => document.getElementById(id);
 
@@ -129,6 +130,11 @@ function renderStats() {
   $("stat-bound").textContent = keys.reduce((total, key) => total + Number(key.used_count || 0), 0);
 }
 
+function renderProduct() {
+  $("dashboard-title").textContent = productName;
+  $("dashboard-product").textContent = productName === "Ghost T Key System" ? "Ghost T Dashboard" : "Dashboard";
+}
+
 function renderKeys() {
   const filter = $("key-filter").value.trim().toLowerCase();
   const table = $("keys-table");
@@ -210,7 +216,9 @@ function buildLoadstring(key) {
 
 async function loadAllKeys() {
   const data = await api("/api/all-keys");
+  productName = data.productName || "Key System Manager";
   keys = data.data || [];
+  renderProduct();
   renderStats();
   renderKeys();
 }
@@ -244,11 +252,12 @@ $("refresh-keys").addEventListener("click", () => {
 $("generate-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const output = $("generated-key");
+  const expiresUnit = $("expires-unit").value;
 
   try {
     const data = await api("/api/generate-key", {
-      expiresIn: Number($("expires-in").value || 0),
-      expiresInUnit: $("expires-unit").value,
+      expiresIn: expiresUnit === "lifetime" ? 0 : Number($("expires-in").value || 0),
+      expiresInUnit: expiresUnit,
       maxUses: Number($("max-uses").value || 1),
       scriptUrl: $("script-url").value.trim(),
       notes: $("notes").value.trim(),
@@ -259,6 +268,14 @@ $("generate-form").addEventListener("submit", async (event) => {
     showResult(output, error.message, true);
   }
 });
+
+function updateDurationControls() {
+  const isLifetime = $("expires-unit").value === "lifetime";
+  $("expires-in").disabled = isLifetime;
+  $("expires-in").required = !isLifetime;
+}
+
+$("expires-unit").addEventListener("change", updateDurationControls);
 
 $("reset-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -374,6 +391,7 @@ document.addEventListener("click", async (event) => {
 });
 
 renderIntegrationSnippets();
+updateDurationControls();
 
 if (adminToken) {
   $("admin-token").value = adminToken;

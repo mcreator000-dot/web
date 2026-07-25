@@ -35,10 +35,12 @@ Vercel serverless functions do not keep a local SQLite database between deployme
 
 ```text
 ADMIN_TOKEN=replace-with-a-long-random-admin-token
+GHOST_T_ADMIN_TOKEN=replace-with-a-long-random-ghost-t-admin-token
 DEVICE_HASH_SECRET=replace-with-a-long-random-device-secret
 CORS_ORIGIN=https://your-project.vercel.app
 PUBLIC_BASE_URL=https://your-project.vercel.app
 DEFAULT_SCRIPT_URL=https://your-domain.example/main.lua
+GHOST_T_SCRIPT_URL=https://your-domain.example/ghost-t.lua
 SCRIPT_URL_ALLOWLIST=your-domain.example
 ALLOW_INSECURE_SCRIPT_URLS=false
 MAX_SCRIPT_BYTES=5242880
@@ -57,10 +59,12 @@ cd key-system
 npm install
 npx vercel
 npx vercel env add ADMIN_TOKEN production
+npx vercel env add GHOST_T_ADMIN_TOKEN production
 npx vercel env add DEVICE_HASH_SECRET production
 npx vercel env add CORS_ORIGIN production
 npx vercel env add PUBLIC_BASE_URL production
 npx vercel env add DEFAULT_SCRIPT_URL production
+npx vercel env add GHOST_T_SCRIPT_URL production
 npx vercel env add SCRIPT_URL_ALLOWLIST production
 npx vercel env add DATABASE_URL production
 npx vercel env add PGSSLMODE production
@@ -70,6 +74,7 @@ npx vercel --prod
 ## API
 
 Admin endpoints accept the token in either the `X-Admin-Token` header or the legacy `adminToken` JSON body field.
+Logging in with `GHOST_T_ADMIN_TOKEN` opens a separate Ghost T dashboard. Ghost T keys are stored with `product: "ghost_t"` and are hidden from the default `ADMIN_TOKEN` dashboard.
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -117,18 +122,21 @@ The dashboard shows execution IPs from active device bindings. `activation_ip` i
 
 ```json
 {
-  "expiresInDays": 30,
+  "expiresIn": 30,
+  "expiresInUnit": "days",
   "maxUses": 1,
   "scriptUrl": "https://your-domain.example/main.lua",
   "notes": "optional"
 }
 ```
 
+Use `"expiresInUnit": "hours"` for hourly keys or `"expiresInUnit": "lifetime"` for keys that never expire.
+
 Use scripts and script URLs you control. Keep admin tokens in environment variables only, and do not put secrets in distributed clients.
 
 ## Security Notes
 
-- Production refuses to start with the development `ADMIN_TOKEN` or `DEVICE_HASH_SECRET`.
+- Production refuses to start with the development `ADMIN_TOKEN`, `GHOST_T_ADMIN_TOKEN`, or `DEVICE_HASH_SECRET`.
 - Generated keys use 25 random characters split across five groups.
 - Protected script URLs must use HTTPS unless they are localhost or `ALLOW_INSECURE_SCRIPT_URLS=true`.
 - Set `SCRIPT_URL_ALLOWLIST` to a comma-separated list of allowed script hostnames so new keys cannot point at arbitrary domains.

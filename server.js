@@ -10,9 +10,11 @@ const rateLimit = require("express-rate-limit");
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "dev-admin-token";
+const GHOST_T_ADMIN_TOKEN = process.env.GHOST_T_ADMIN_TOKEN || "dev-ghost-t-admin-token";
 const DEVICE_HASH_SECRET = process.env.DEVICE_HASH_SECRET || "dev-device-secret";
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 const DEFAULT_SCRIPT_URL = process.env.DEFAULT_SCRIPT_URL || "";
+const GHOST_T_SCRIPT_URL = process.env.GHOST_T_SCRIPT_URL || "";
 const MAX_SCRIPT_BYTES = Number(process.env.MAX_SCRIPT_BYTES || 5 * 1024 * 1024);
 const SCRIPT_URL_ALLOWLIST = String(process.env.SCRIPT_URL_ALLOWLIST || "")
   .split(",")
@@ -30,15 +32,25 @@ if (ADMIN_TOKEN === "dev-admin-token") {
   console.warn("ADMIN_TOKEN is not set. Using development token: dev-admin-token");
 }
 
+if (GHOST_T_ADMIN_TOKEN === "dev-ghost-t-admin-token") {
+  console.warn("GHOST_T_ADMIN_TOKEN is not set. Using development token: dev-ghost-t-admin-token");
+}
+
 if (DEVICE_HASH_SECRET === "dev-device-secret") {
   console.warn("DEVICE_HASH_SECRET is not set. Set it before production use.");
 }
+
+const ADMIN_PRODUCTS = [
+  { token: ADMIN_TOKEN, product: "default", name: "Key System Manager", defaultScriptUrl: DEFAULT_SCRIPT_URL },
+  { token: GHOST_T_ADMIN_TOKEN, product: "ghost_t", name: "Ghost T Key System", defaultScriptUrl: GHOST_T_SCRIPT_URL || DEFAULT_SCRIPT_URL },
+];
 
 function assertProductionConfig() {
   if (process.env.NODE_ENV !== "production") return;
 
   const failures = [];
   if (ADMIN_TOKEN === "dev-admin-token") failures.push("ADMIN_TOKEN");
+  if (GHOST_T_ADMIN_TOKEN === "dev-ghost-t-admin-token") failures.push("GHOST_T_ADMIN_TOKEN");
   if (DEVICE_HASH_SECRET === "dev-device-secret") failures.push("DEVICE_HASH_SECRET");
   if (!process.env.PUBLIC_BASE_URL && !process.env.VERCEL_PROJECT_PRODUCTION_URL) failures.push("PUBLIC_BASE_URL");
 
@@ -144,10 +156,12 @@ async function initDatabase() {
       expires_at ${USE_POSTGRES ? "TIMESTAMPTZ" : "TEXT"},
       is_active INTEGER NOT NULL DEFAULT 1,
       max_devices INTEGER NOT NULL DEFAULT 1,
+      product TEXT NOT NULL DEFAULT 'default',
       script_url TEXT NOT NULL DEFAULT '',
       notes TEXT NOT NULL DEFAULT ''
     )
   `);
+  await ensureColumn("license_keys", "product", "TEXT NOT NULL DEFAULT 'default'");
   await ensureColumn("license_keys", "script_url", "TEXT NOT NULL DEFAULT ''");
   await run(`
     CREATE TABLE IF NOT EXISTS key_devices (
@@ -240,9 +254,15 @@ function timingSafeEqual(a, b) {
 
 function requireAdmin(req, res, next) {
   const suppliedToken = req.get("x-admin-token") || req.body.adminToken;
-  if (!timingSafeEqual(suppliedToken, ADMIN_TOKEN)) {
+  const adminProduct = ADMIN_PRODUCTS.find((entry) => timingSafeEqual(suppliedToken, entry.token));
+
+  if (!adminProduct) {
     return jsonError(res, 403, "Unauthorized", "unauthorized");
   }
+
+  req.adminProduct = adminProduct.product;
+  req.adminProductName = adminProduct.name;
+  req.adminDefaultScriptUrl = adminProduct.defaultScriptUrl;
   return next();
 }
 
@@ -650,16 +670,17 @@ app.post("/api/generate-key", requireAdmin, asyncHandler(async (req, res) => {
   const requestedExpiresIn = req.body.expiresIn !== undefined ? req.body.expiresIn : req.body.expiresInDays;
   const expiresIn = Math.max(0, Number(requestedExpiresIn || 0));
   const expiresInUnit = String(req.body.expiresInUnit || (req.body.expiresInHours !== undefined ? "hours" : "days")).toLowerCase();
+  const isLifetime = expiresInUnit === "lifetime";
   const expiresInHours = req.body.expiresInHours !== undefined
     ? Math.max(0, Number(req.body.expiresInHours || 0))
     : expiresIn * (expiresInUnit === "hours" ? 1 : 24);
   const maxDevices = Math.max(1, Number(req.body.maxUses || req.body.maxDevices || 1));
   const notes = String(req.body.notes || "").slice(0, 500);
-  const scriptUrl = normalizeScriptUrl(req.body.scriptUrl);
+  const scriptUrl = normalizeScriptUrl(req.body.scriptUrl || req.adminDefaultScriptUrl);
   if (!scriptUrl) {
     return jsonError(res, 400, "Missing script URL", "missing_script_url");
   }
-  const expiresAt = expiresInHours > 0
+  const expiresAt = !isLifetime && expiresInHours > 0
     ? new Date(Date.now() + expiresInHours * 60 * 60 * 1000).toISOString()
     : null;
 
@@ -667,18 +688,20 @@ app.post("/api/generate-key", requireAdmin, asyncHandler(async (req, res) => {
     const keyCode = generateKey();
     try {
       await run(
-        `INSERT INTO license_keys (key_code, expires_at, max_devices, script_url, notes)
-         VALUES (?, ?, ?, ?, ?)`,
-        [keyCode, expiresAt, maxDevices, scriptUrl, notes]
+        `INSERT INTO license_keys (key_code, expires_at, max_devices, product, script_url, notes)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [keyCode, expiresAt, maxDevices, req.adminProduct, scriptUrl, notes]
       );
       await logUsage({
         keyCode,
         ip: req.ip,
         action: "KEY_GENERATED",
-        details: JSON.stringify({ maxDevices, expiresAt, scriptUrl }),
+        details: JSON.stringify({ maxDevices, expiresAt, scriptUrl, product: req.adminProduct }),
       });
       return res.json({
         success: true,
+        product: req.adminProduct,
+        productName: req.adminProductName,
         key: keyCode,
         expiresAt,
         maxUses: maxDevices,
@@ -750,7 +773,7 @@ app.post(["/api/reset-hwid", "/api/reset-device"], requireAdmin, asyncHandler(as
     return jsonError(res, 400, "Missing key", "missing_key");
   }
 
-  const keyRow = await get("SELECT * FROM license_keys WHERE key_code = ?", [keyCode]);
+  const keyRow = await get("SELECT * FROM license_keys WHERE key_code = ? AND product = ?", [keyCode, req.adminProduct]);
   if (!keyRow) {
     return jsonError(res, 404, "Key not found", "not_found");
   }
@@ -815,8 +838,8 @@ app.post(["/api/unblacklist-hwid", "/api/unblacklist-device"], requireAdmin, asy
   });
 }));
 
-async function getKeyDevicesForAdmin(keyCode) {
-  const keyRow = await get("SELECT * FROM license_keys WHERE key_code = ?", [keyCode]);
+async function getKeyDevicesForAdmin(keyCode, product) {
+  const keyRow = await get("SELECT * FROM license_keys WHERE key_code = ? AND product = ?", [keyCode, product]);
   if (!keyRow) {
     return { keyRow: null, devices: [] };
   }
@@ -837,7 +860,7 @@ app.post("/api/blacklist-key-devices", requireAdmin, asyncHandler(async (req, re
     return jsonError(res, 400, "Missing key", "missing_key");
   }
 
-  const { keyRow, devices } = await getKeyDevicesForAdmin(keyCode);
+  const { keyRow, devices } = await getKeyDevicesForAdmin(keyCode, req.adminProduct);
   if (!keyRow) {
     return jsonError(res, 404, "Key not found", "not_found");
   }
@@ -874,7 +897,7 @@ app.post("/api/unblacklist-key-devices", requireAdmin, asyncHandler(async (req, 
     return jsonError(res, 400, "Missing key", "missing_key");
   }
 
-  const { keyRow, devices } = await getKeyDevicesForAdmin(keyCode);
+  const { keyRow, devices } = await getKeyDevicesForAdmin(keyCode, req.adminProduct);
   if (!keyRow) {
     return jsonError(res, 404, "Key not found", "not_found");
   }
@@ -914,9 +937,9 @@ app.post("/api/key-info", requireAdmin, asyncHandler(async (req, res) => {
      FROM license_keys lk
      LEFT JOIN key_devices kd ON kd.key_id = lk.id
      LEFT JOIN device_blacklist dbl ON dbl.device_hash = kd.device_hash
-     WHERE lk.key_code = ?
+     WHERE lk.key_code = ? AND lk.product = ?
      GROUP BY lk.id`,
-    [keyCode]
+    [keyCode, req.adminProduct]
   );
 
   if (!keyRow) {
@@ -947,11 +970,17 @@ app.post("/api/all-keys", requireAdmin, asyncHandler(async (_req, res) => {
     FROM license_keys lk
     LEFT JOIN key_devices kd ON kd.key_id = lk.id
     LEFT JOIN device_blacklist dbl ON dbl.device_hash = kd.device_hash
+    WHERE lk.product = ?
     GROUP BY lk.id
     ORDER BY lk.created_at DESC
-  `);
+  `, [_req.adminProduct]);
 
-  return res.json({ success: true, data: rows.map(formatKeyRow) });
+  return res.json({
+    success: true,
+    product: _req.adminProduct,
+    productName: _req.adminProductName,
+    data: rows.map(formatKeyRow),
+  });
 }));
 
 app.post("/api/toggle-key", requireAdmin, asyncHandler(async (req, res) => {
@@ -962,7 +991,10 @@ app.post("/api/toggle-key", requireAdmin, asyncHandler(async (req, res) => {
     return jsonError(res, 400, "Missing key", "missing_key");
   }
 
-  const result = await run("UPDATE license_keys SET is_active = ? WHERE key_code = ?", [isActive, keyCode]);
+  const result = await run(
+    "UPDATE license_keys SET is_active = ? WHERE key_code = ? AND product = ?",
+    [isActive, keyCode, req.adminProduct]
+  );
   if (!result.changes) {
     return jsonError(res, 404, "Key not found", "not_found");
   }
@@ -983,7 +1015,7 @@ app.post("/api/delete-key", requireAdmin, asyncHandler(async (req, res) => {
     return jsonError(res, 400, "Missing key", "missing_key");
   }
 
-  const result = await run("DELETE FROM license_keys WHERE key_code = ?", [keyCode]);
+  const result = await run("DELETE FROM license_keys WHERE key_code = ? AND product = ?", [keyCode, req.adminProduct]);
   if (!result.changes) {
     return jsonError(res, 404, "Key not found", "not_found");
   }

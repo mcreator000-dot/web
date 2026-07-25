@@ -25,8 +25,8 @@
       <section id="dashboard-view" class="dashboard is-hidden">
         <header class="topbar">
           <div>
-            <p class="eyebrow">Dashboard</p>
-            <h1>Key System Manager</h1>
+            <p id="dashboard-product" class="eyebrow">Dashboard</p>
+            <h1 id="dashboard-title">Key System Manager</h1>
           </div>
           <div class="topbar-actions">
             <button id="refresh-keys" type="button">Refresh</button>
@@ -60,6 +60,7 @@
                   <select id="expires-unit" aria-label="Expiration unit">
                     <option value="days" selected>Days</option>
                     <option value="hours">Hours</option>
+                    <option value="lifetime">Lifetime</option>
                   </select>
                 </div>
               </label>
