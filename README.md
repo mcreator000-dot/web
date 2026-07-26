@@ -44,6 +44,7 @@ GHOST_T_SCRIPT_URL=https://your-domain.example/ghost-t.lua
 SCRIPT_URL_ALLOWLIST=your-domain.example
 ALLOW_INSECURE_SCRIPT_URLS=false
 MAX_SCRIPT_BYTES=5242880
+AUTO_DELETE_EXPIRED_KEYS=true
 DATABASE_URL=postgres://...
 PGSSLMODE=require
 ```
@@ -66,6 +67,7 @@ npx vercel env add PUBLIC_BASE_URL production
 npx vercel env add DEFAULT_SCRIPT_URL production
 npx vercel env add GHOST_T_SCRIPT_URL production
 npx vercel env add SCRIPT_URL_ALLOWLIST production
+npx vercel env add AUTO_DELETE_EXPIRED_KEYS production
 npx vercel env add DATABASE_URL production
 npx vercel env add PGSSLMODE production
 npx vercel --prod
@@ -130,7 +132,7 @@ The dashboard shows execution IPs from active device bindings. `activation_ip` i
 }
 ```
 
-Use `"expiresInUnit": "hours"` for hourly keys or `"expiresInUnit": "lifetime"` for keys that never expire.
+Use `"expiresInUnit": "hours"` for hourly keys or `"expiresInUnit": "lifetime"` for keys that never expire. Expired keys with an `expiresAt` value are automatically removed before API requests when `AUTO_DELETE_EXPIRED_KEYS` is not set to `false`; lifetime keys have no expiration and are kept.
 
 Use scripts and script URLs you control. Keep admin tokens in environment variables only, and do not put secrets in distributed clients.
 

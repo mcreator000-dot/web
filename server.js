@@ -21,12 +21,14 @@ const SCRIPT_URL_ALLOWLIST = String(process.env.SCRIPT_URL_ALLOWLIST || "")
   .map((host) => host.trim().toLowerCase())
   .filter(Boolean);
 const ALLOW_INSECURE_SCRIPT_URLS = process.env.ALLOW_INSECURE_SCRIPT_URLS === "true";
+const AUTO_DELETE_EXPIRED_KEYS = process.env.AUTO_DELETE_EXPIRED_KEYS !== "false";
 const DATABASE_URL = process.env.DATABASE_URL;
 const USE_POSTGRES = Boolean(DATABASE_URL);
 let dbReady;
 let sqliteDb;
 let pgPool;
 let dbInitFailed = false;
+let deletingExpiredKeys;
 
 if (ADMIN_TOKEN === "dev-admin-token") {
   console.warn("ADMIN_TOKEN is not set. Using development token: dev-admin-token");
@@ -201,6 +203,28 @@ async function initDatabase() {
       timestamp ${USE_POSTGRES ? "TIMESTAMPTZ" : "TEXT"} NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
+}
+
+async function deleteExpiredKeys() {
+  if (!AUTO_DELETE_EXPIRED_KEYS) {
+    return { changes: 0 };
+  }
+
+  if (deletingExpiredKeys) {
+    return deletingExpiredKeys;
+  }
+
+  const sql = USE_POSTGRES
+    ? "DELETE FROM license_keys WHERE expires_at IS NOT NULL AND expires_at <= NOW()"
+    : "DELETE FROM license_keys WHERE expires_at IS NOT NULL AND datetime(expires_at) <= datetime('now')";
+
+  deletingExpiredKeys = run(sql)
+    .then((result) => ({ changes: Number(result.changes || 0) }))
+    .finally(() => {
+      deletingExpiredKeys = null;
+    });
+
+  return deletingExpiredKeys;
 }
 
 function ensureDbReady() {
@@ -659,7 +683,10 @@ app.use((req, res, next) => {
     return next();
   }
 
-  return ensureDbReady().then(() => next()).catch(next);
+  return ensureDbReady()
+    .then(() => deleteExpiredKeys())
+    .then(() => next())
+    .catch(next);
 });
 
 app.get("/api/health", (_req, res) => {
@@ -1038,6 +1065,7 @@ function formatKeyRow(row) {
   return {
     id: row.id,
     key: row.key_code,
+    product: row.product || "default",
     created_at: row.created_at,
     expires_at: row.expires_at,
     is_active: Boolean(row.is_active),
