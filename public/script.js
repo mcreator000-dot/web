@@ -1,5 +1,7 @@
 let adminToken = sessionStorage.getItem("keySystemAdminToken") || "";
 let keys = [];
+let auditLogs = [];
+let product = "default";
 let productName = "Key System Manager";
 
 const $ = (id) => document.getElementById(id);
@@ -47,13 +49,16 @@ function showGeneratedKey(element, data) {
 }
 
 async function api(path, body = {}) {
+  const adminActorInput = $("admin-actor");
+  const adminActor = adminActorInput ? adminActorInput.value.trim() : "";
+  const payload = adminActor ? { ...body, adminActor } : body;
   const response = await fetch(path, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "X-Admin-Token": adminToken,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(payload),
   });
 
   const data = await response.json().catch(() => ({}));
@@ -93,6 +98,12 @@ function formatDate(value) {
   if (!value) return "Never";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "Never" : date.toLocaleDateString();
+}
+
+function formatDateTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
 }
 
 function formatExpires(value) {
@@ -187,6 +198,35 @@ function renderKeys() {
   }
 }
 
+function renderAuditLogs() {
+  const table = $("audit-table");
+  table.innerHTML = "";
+
+  if (!auditLogs.length) {
+    const row = document.createElement("tr");
+    row.innerHTML = '<td colspan="7">No audit events yet.</td>';
+    table.appendChild(row);
+    return;
+  }
+
+  for (const entry of auditLogs) {
+    const details = entry.reason || (
+      entry.details && entry.details.count !== undefined ? `Count: ${entry.details.count}` : ""
+    );
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td>${escapeHtml(formatDateTime(entry.timestamp))}</td>
+      <td>${escapeHtml(entry.action || "")}</td>
+      <td><span class="key-code">${escapeHtml(entry.key || "")}</span></td>
+      <td>${escapeHtml(entry.userId || "")}</td>
+      <td>${escapeHtml(entry.adminActor || "")}</td>
+      <td>${escapeHtml(entry.ip || "")}</td>
+      <td>${escapeHtml(details)}</td>
+    `;
+    table.appendChild(row);
+  }
+}
+
 function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -198,8 +238,9 @@ function escapeHtml(value) {
 
 function renderIntegrationSnippets() {
   const loaderUrl = `${window.location.origin}/api/loader`;
+  const productPrefix = product === "ghost_t" ? 'script_product="ghost_t"; ' : "";
 
-  $("curl-snippet").textContent = `script_key="KEY-ABCD-EFGH-JKLM-NPQR"; loadstring(game:HttpGet("${loaderUrl}", true))()`;
+  $("curl-snippet").textContent = `${productPrefix}script_key="KEY-ABCD-EFGH-JKLM-NPQR"; loadstring(game:HttpGet("${loaderUrl}", true))()`;
 
   $("js-snippet").textContent = [
     `GET  ${loaderUrl}`,
@@ -211,16 +252,24 @@ function renderIntegrationSnippets() {
 }
 
 function buildLoadstring(key) {
-  return `script_key="${key}"; loadstring(game:HttpGet("${window.location.origin}/api/loader", true))()`;
+  const productPrefix = product === "ghost_t" ? 'script_product="ghost_t"; ' : "";
+  return `${productPrefix}script_key="${key}"; loadstring(game:HttpGet("${window.location.origin}/api/loader", true))()`;
 }
 
 async function loadAllKeys() {
   const data = await api("/api/all-keys");
+  product = data.product || "default";
   productName = data.productName || "Key System Manager";
   keys = data.data || [];
   renderProduct();
   renderStats();
   renderKeys();
+}
+
+async function loadAuditLogs() {
+  const data = await api("/api/audit-logs", { limit: 80 });
+  auditLogs = data.data || [];
+  renderAuditLogs();
 }
 
 $("login-form").addEventListener("submit", async (event) => {
@@ -231,6 +280,7 @@ $("login-form").addEventListener("submit", async (event) => {
   try {
     sessionStorage.setItem("keySystemAdminToken", adminToken);
     await loadAllKeys();
+    await loadAuditLogs();
     show("dashboard");
   } catch (error) {
     sessionStorage.removeItem("keySystemAdminToken");
@@ -246,7 +296,11 @@ $("logout").addEventListener("click", () => {
 });
 
 $("refresh-keys").addEventListener("click", () => {
-  loadAllKeys().catch((error) => alert(error.message));
+  Promise.all([loadAllKeys(), loadAuditLogs()]).catch((error) => alert(error.message));
+});
+
+$("refresh-audit").addEventListener("click", () => {
+  loadAuditLogs().catch((error) => alert(error.message));
 });
 
 $("generate-form").addEventListener("submit", async (event) => {
@@ -264,6 +318,7 @@ $("generate-form").addEventListener("submit", async (event) => {
     });
     showGeneratedKey(output, data);
     await loadAllKeys();
+    await loadAuditLogs();
   } catch (error) {
     showResult(output, error.message, true);
   }
@@ -288,6 +343,7 @@ $("reset-form").addEventListener("submit", async (event) => {
     });
     showResult(output, `${data.message}. Updated rows: ${data.changed}`);
     await loadAllKeys();
+    await loadAuditLogs();
   } catch (error) {
     showResult(output, error.message, true);
   }
@@ -330,6 +386,7 @@ $("keys-table").addEventListener("click", async (event) => {
         isActive: button.dataset.active === "1",
       });
       await loadAllKeys();
+      await loadAuditLogs();
     } catch (error) {
       alert(error.message);
     }
@@ -351,6 +408,7 @@ $("keys-table").addEventListener("click", async (event) => {
       });
       showResult($("device-result"), `${data.message}. Updated rows: ${data.changed}`);
       await loadAllKeys();
+      await loadAuditLogs();
     } catch (error) {
       showResult($("device-result"), error.message, true);
     }
@@ -364,6 +422,7 @@ $("keys-table").addEventListener("click", async (event) => {
     try {
       await api("/api/delete-key", { key: deleteKey });
       await loadAllKeys();
+      await loadAuditLogs();
     } catch (error) {
       alert(error.message);
     }

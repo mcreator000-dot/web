@@ -29,6 +29,7 @@
             <h1 id="dashboard-title">Key System Manager</h1>
           </div>
           <div class="topbar-actions">
+            <input id="admin-actor" type="text" maxlength="120" placeholder="Admin name">
             <button id="refresh-keys" type="button">Refresh</button>
             <button id="logout" type="button" class="secondary">Logout</button>
           </div>
@@ -143,6 +144,29 @@
                 </tr>
               </thead>
               <tbody id="keys-table"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel audit-panel">
+          <div class="section-head">
+            <h2>Audit</h2>
+            <button id="refresh-audit" type="button" class="secondary">Refresh Audit</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Action</th>
+                  <th>Key</th>
+                  <th>User</th>
+                  <th>Admin</th>
+                  <th>IP</th>
+                  <th>Details</th>
+                </tr>
+              </thead>
+              <tbody id="audit-table"></tbody>
             </table>
           </div>
         </section>

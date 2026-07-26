@@ -294,6 +294,17 @@ function normalizeKey(value) {
   return String(value || "").trim().toUpperCase();
 }
 
+function normalizeProduct(value) {
+  const product = String(value || "").trim();
+  return ADMIN_PRODUCTS.some((entry) => entry.product === product) ? product : null;
+}
+
+function normalizeAdminActor(req) {
+  return String(req.body.adminActor || req.body.actor || req.get("x-admin-actor") || req.adminProductName || "dashboard")
+    .trim()
+    .slice(0, 120);
+}
+
 function normalizeDeviceId(req) {
   return String(req.body.deviceId || req.body.hwid || "").trim();
 }
@@ -337,9 +348,10 @@ function normalizeScriptUrl(value) {
   return parsed.toString();
 }
 
-function buildLoadstring(baseUrl, keyCode) {
+function buildLoadstring(baseUrl, keyCode, product) {
   const loaderUrl = `${baseUrl.replace(/\/+$/, "")}/api/loader`;
-  return `script_key="${keyCode}"; loadstring(game:HttpGet("${loaderUrl}", true))()`;
+  const productPrefix = product ? `script_product="${product}"; ` : "";
+  return `${productPrefix}script_key="${keyCode}"; loadstring(game:HttpGet("${loaderUrl}", true))()`;
 }
 
 function hashDeviceId(deviceId) {
@@ -401,7 +413,7 @@ function blacklistedDevicesSelectSql() {
   return "SUM(CASE WHEN dbl.id IS NOT NULL THEN 1 ELSE 0 END) AS blacklisted_count";
 }
 
-async function validateKeyForDevice({ keyCode, deviceId, userId, ip }) {
+async function validateKeyForDevice({ keyCode, deviceId, userId, ip, product }) {
   if (!keyCode || !deviceId) {
     return { ok: false, status: 400, message: "Missing key or device ID", code: "missing_fields" };
   }
@@ -415,7 +427,10 @@ async function validateKeyForDevice({ keyCode, deviceId, userId, ip }) {
     return { ok: false, status: 403, message: "This device is blacklisted", code: "blacklisted" };
   }
 
-  const keyRow = await get("SELECT * FROM license_keys WHERE key_code = ?", [keyCode]);
+  const normalizedProduct = normalizeProduct(product);
+  const keyRow = normalizedProduct
+    ? await get("SELECT * FROM license_keys WHERE key_code = ? AND product = ?", [keyCode, normalizedProduct])
+    : await get("SELECT * FROM license_keys WHERE key_code = ?", [keyCode]);
   if (!keyRow) {
     await logUsage({ keyCode, deviceHash, userId, ip, action: "INVALID_KEY" });
     return { ok: false, status: 404, message: "Invalid key", code: "invalid" };
@@ -583,6 +598,7 @@ end
 
 local function validate()
   local key = script_key or _G.script_key or shared.script_key
+  local product = script_product or _G.script_product or shared.script_product
   if not key or tostring(key) == "" then
     return false, "Missing script key"
   end
@@ -590,6 +606,7 @@ local function validate()
   local player = Players.LocalPlayer
   local body = HttpService:JSONEncode({
     key = tostring(key),
+    product = product and tostring(product) or nil,
     hwid = getDeviceId(),
     userId = player and tostring(player.UserId) or nil
   })
@@ -703,6 +720,7 @@ app.post("/api/generate-key", requireAdmin, asyncHandler(async (req, res) => {
     : expiresIn * (expiresInUnit === "hours" ? 1 : 24);
   const maxDevices = Math.max(1, Number(req.body.maxUses || req.body.maxDevices || 1));
   const notes = String(req.body.notes || "").slice(0, 500);
+  const adminActor = normalizeAdminActor(req);
   const scriptUrl = normalizeScriptUrl(req.body.scriptUrl || req.adminDefaultScriptUrl);
   if (!scriptUrl) {
     return jsonError(res, 400, "Missing script URL", "missing_script_url");
@@ -723,7 +741,7 @@ app.post("/api/generate-key", requireAdmin, asyncHandler(async (req, res) => {
         keyCode,
         ip: req.ip,
         action: "KEY_GENERATED",
-        details: JSON.stringify({ maxDevices, expiresAt, scriptUrl, product: req.adminProduct }),
+        details: JSON.stringify({ maxDevices, expiresAt, scriptUrl, product: req.adminProduct, adminActor }),
       });
       return res.json({
         success: true,
@@ -733,7 +751,7 @@ app.post("/api/generate-key", requireAdmin, asyncHandler(async (req, res) => {
         expiresAt,
         maxUses: maxDevices,
         scriptUrl,
-        loadstring: buildLoadstring(getPublicBaseUrl(req), keyCode),
+        loadstring: buildLoadstring(getPublicBaseUrl(req), keyCode, req.adminProduct),
       });
     } catch (error) {
       if (!isUniqueError(error)) throw error;
@@ -747,9 +765,10 @@ app.post("/api/validate-key", asyncHandler(async (req, res) => {
   const keyCode = normalizeKey(req.body.key);
   const deviceId = normalizeDeviceId(req);
   const userId = req.body.userId ? String(req.body.userId).slice(0, 128) : null;
+  const product = req.body.product;
   const ip = req.ip;
 
-  const result = await validateKeyForDevice({ keyCode, deviceId, userId, ip });
+  const result = await validateKeyForDevice({ keyCode, deviceId, userId, ip, product });
   if (!result.ok) {
     return jsonError(res, result.status, result.message, result.code);
   }
@@ -773,7 +792,7 @@ app.post("/api/loader", asyncHandler(async (req, res) => {
   const keyCode = normalizeKey(req.body.key);
   const deviceId = normalizeDeviceId(req);
   const userId = req.body.userId ? String(req.body.userId).slice(0, 128) : null;
-  const result = await validateKeyForDevice({ keyCode, deviceId, userId, ip: req.ip });
+  const result = await validateKeyForDevice({ keyCode, deviceId, userId, ip: req.ip, product: req.body.product });
 
   if (!result.ok) {
     return jsonError(res, result.status, result.message, result.code);
@@ -795,6 +814,7 @@ app.post("/api/loader", asyncHandler(async (req, res) => {
 app.post(["/api/reset-hwid", "/api/reset-device"], requireAdmin, asyncHandler(async (req, res) => {
   const keyCode = normalizeKey(req.body.key);
   const deviceId = normalizeDeviceId(req);
+  const adminActor = normalizeAdminActor(req);
 
   if (!keyCode) {
     return jsonError(res, 400, "Missing key", "missing_key");
@@ -812,10 +832,10 @@ app.post(["/api/reset-hwid", "/api/reset-device"], requireAdmin, asyncHandler(as
       "UPDATE key_devices SET active = 0 WHERE key_id = ? AND device_hash = ?",
       [keyRow.id, deviceHash]
     );
-    await logUsage({ keyCode, deviceHash, ip: req.ip, action: "DEVICE_RESET" });
+    await logUsage({ keyCode, deviceHash, ip: req.ip, action: "DEVICE_RESET", details: JSON.stringify({ adminActor }) });
   } else {
     result = await run("UPDATE key_devices SET active = 0 WHERE key_id = ?", [keyRow.id]);
-    await logUsage({ keyCode, ip: req.ip, action: "ALL_DEVICES_RESET" });
+    await logUsage({ keyCode, ip: req.ip, action: "ALL_DEVICES_RESET", details: JSON.stringify({ adminActor }) });
   }
 
   return res.json({
@@ -828,6 +848,7 @@ app.post(["/api/reset-hwid", "/api/reset-device"], requireAdmin, asyncHandler(as
 app.post(["/api/blacklist-hwid", "/api/blacklist-device"], requireAdmin, asyncHandler(async (req, res) => {
   const deviceId = normalizeDeviceId(req);
   const reason = String(req.body.reason || "No reason provided").slice(0, 500);
+  const adminActor = normalizeAdminActor(req);
 
   if (!deviceId) {
     return jsonError(res, 400, "Missing device ID", "missing_device");
@@ -842,13 +863,14 @@ app.post(["/api/blacklist-hwid", "/api/blacklist-device"], requireAdmin, asyncHa
     [deviceHash, reason]
   );
   await run("UPDATE key_devices SET active = 0 WHERE device_hash = ?", [deviceHash]);
-  await logUsage({ deviceHash, ip: req.ip, action: "DEVICE_BLACKLISTED", details: reason });
+  await logUsage({ deviceHash, ip: req.ip, action: "DEVICE_BLACKLISTED", details: JSON.stringify({ reason, adminActor, product: req.adminProduct }) });
 
   return res.json({ success: true, message: "Device blacklisted successfully" });
 }));
 
 app.post(["/api/unblacklist-hwid", "/api/unblacklist-device"], requireAdmin, asyncHandler(async (req, res) => {
   const deviceId = normalizeDeviceId(req);
+  const adminActor = normalizeAdminActor(req);
 
   if (!deviceId) {
     return jsonError(res, 400, "Missing device ID", "missing_device");
@@ -856,7 +878,7 @@ app.post(["/api/unblacklist-hwid", "/api/unblacklist-device"], requireAdmin, asy
 
   const deviceHash = hashDeviceId(deviceId);
   const result = await run("DELETE FROM device_blacklist WHERE device_hash = ?", [deviceHash]);
-  await logUsage({ deviceHash, ip: req.ip, action: "DEVICE_UNBLACKLISTED" });
+  await logUsage({ deviceHash, ip: req.ip, action: "DEVICE_UNBLACKLISTED", details: JSON.stringify({ adminActor, product: req.adminProduct }) });
 
   return res.json({
     success: true,
@@ -882,6 +904,7 @@ async function getKeyDevicesForAdmin(keyCode, product) {
 app.post("/api/blacklist-key-devices", requireAdmin, asyncHandler(async (req, res) => {
   const keyCode = normalizeKey(req.body.key);
   const reason = String(req.body.reason || `Blacklisted from key ${keyCode}`).slice(0, 500);
+  const adminActor = normalizeAdminActor(req);
 
   if (!keyCode) {
     return jsonError(res, 400, "Missing key", "missing_key");
@@ -907,7 +930,7 @@ app.post("/api/blacklist-key-devices", requireAdmin, asyncHandler(async (req, re
     keyCode,
     ip: req.ip,
     action: "KEY_DEVICES_BLACKLISTED",
-    details: JSON.stringify({ count: devices.length, reason }),
+    details: JSON.stringify({ count: devices.length, reason, adminActor }),
   });
 
   return res.json({
@@ -919,6 +942,7 @@ app.post("/api/blacklist-key-devices", requireAdmin, asyncHandler(async (req, re
 
 app.post("/api/unblacklist-key-devices", requireAdmin, asyncHandler(async (req, res) => {
   const keyCode = normalizeKey(req.body.key);
+  const adminActor = normalizeAdminActor(req);
 
   if (!keyCode) {
     return jsonError(res, 400, "Missing key", "missing_key");
@@ -939,7 +963,7 @@ app.post("/api/unblacklist-key-devices", requireAdmin, asyncHandler(async (req, 
     keyCode,
     ip: req.ip,
     action: "KEY_DEVICES_UNBLACKLISTED",
-    details: JSON.stringify({ count: changed }),
+    details: JSON.stringify({ count: changed, adminActor }),
   });
 
   return res.json({
@@ -1010,9 +1034,30 @@ app.post("/api/all-keys", requireAdmin, asyncHandler(async (_req, res) => {
   });
 }));
 
+app.post("/api/audit-logs", requireAdmin, asyncHandler(async (req, res) => {
+  const limit = Math.min(200, Math.max(1, Number(req.body.limit || 80)));
+  const rows = await all(`
+    SELECT ul.*
+    FROM usage_logs ul
+    LEFT JOIN license_keys lk ON lk.key_code = ul.key_code
+    WHERE lk.product = ?
+       OR (ul.key_code IS NULL AND ul.details LIKE ?)
+    ORDER BY ul.timestamp DESC
+    LIMIT ?
+  `, [req.adminProduct, `%"product":"${req.adminProduct}"%`, limit]);
+
+  return res.json({
+    success: true,
+    product: req.adminProduct,
+    productName: req.adminProductName,
+    data: rows.map(formatAuditLogRow),
+  });
+}));
+
 app.post("/api/toggle-key", requireAdmin, asyncHandler(async (req, res) => {
   const keyCode = normalizeKey(req.body.key);
   const isActive = req.body.isActive ? 1 : 0;
+  const adminActor = normalizeAdminActor(req);
 
   if (!keyCode) {
     return jsonError(res, 400, "Missing key", "missing_key");
@@ -1030,6 +1075,7 @@ app.post("/api/toggle-key", requireAdmin, asyncHandler(async (req, res) => {
     keyCode,
     ip: req.ip,
     action: isActive ? "KEY_ENABLED" : "KEY_DISABLED",
+    details: JSON.stringify({ adminActor }),
   });
 
   return res.json({ success: true, message: isActive ? "Key enabled" : "Key disabled" });
@@ -1037,6 +1083,7 @@ app.post("/api/toggle-key", requireAdmin, asyncHandler(async (req, res) => {
 
 app.post("/api/delete-key", requireAdmin, asyncHandler(async (req, res) => {
   const keyCode = normalizeKey(req.body.key);
+  const adminActor = normalizeAdminActor(req);
 
   if (!keyCode) {
     return jsonError(res, 400, "Missing key", "missing_key");
@@ -1051,6 +1098,7 @@ app.post("/api/delete-key", requireAdmin, asyncHandler(async (req, res) => {
     keyCode,
     ip: req.ip,
     action: "KEY_DELETED",
+    details: JSON.stringify({ adminActor }),
   });
 
   return res.json({ success: true, message: "Key deleted" });
@@ -1077,6 +1125,29 @@ function formatKeyRow(row) {
     script_url: row.script_url || "",
     notes: row.notes || "",
     expired: isExpired(row),
+  };
+}
+
+function formatAuditLogRow(row) {
+  let details = {};
+  if (row.details) {
+    try {
+      details = JSON.parse(row.details);
+    } catch (_error) {
+      details = { note: row.details };
+    }
+  }
+
+  return {
+    id: row.id,
+    key: row.key_code || "",
+    userId: row.user_id || "",
+    ip: row.ip || "",
+    action: row.action,
+    timestamp: row.timestamp,
+    adminActor: details.adminActor || "",
+    reason: details.reason || details.note || "",
+    details,
   };
 }
 
