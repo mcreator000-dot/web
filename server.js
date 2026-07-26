@@ -1095,6 +1095,33 @@ app.post("/api/toggle-key", requireAdmin, asyncHandler(async (req, res) => {
   return res.json({ success: true, message: isActive ? "Key enabled" : "Key disabled" });
 }));
 
+app.post("/api/update-notes", requireAdmin, asyncHandler(async (req, res) => {
+  const keyCode = normalizeKey(req.body.key);
+  const notes = String(req.body.notes || "").slice(0, 500);
+  const adminActor = normalizeAdminActor(req);
+
+  if (!keyCode) {
+    return jsonError(res, 400, "Missing key", "missing_key");
+  }
+
+  const result = await run(
+    "UPDATE license_keys SET notes = ? WHERE key_code = ? AND product = ?",
+    [notes, keyCode, req.adminProduct]
+  );
+  if (!result.changes) {
+    return jsonError(res, 404, "Key not found", "not_found");
+  }
+
+  await logUsage({
+    keyCode,
+    ip: req.ip,
+    action: "KEY_NOTES_UPDATED",
+    details: JSON.stringify({ adminActor }),
+  });
+
+  return res.json({ success: true, message: "Notes updated", notes });
+}));
+
 app.post("/api/delete-key", requireAdmin, asyncHandler(async (req, res) => {
   const keyCode = normalizeKey(req.body.key);
   const adminActor = normalizeAdminActor(req);

@@ -343,6 +343,23 @@ h2 {
   font-size: 0.8rem;
 }
 
+.notes-control {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto;
+  gap: 8px;
+  min-width: 240px;
+}
+
+.notes-control input {
+  min-height: 32px;
+}
+
+.notes-control button {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 0.8rem;
+}
+
 pre {
   margin: 0;
   max-height: 300px;

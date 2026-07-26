@@ -89,6 +89,7 @@ Logging in with `GHOST_T_ADMIN_TOKEN` opens a separate Ghost T dashboard. Ghost 
 | `POST /api/unblacklist-hwid` | Remove a device ID from the blacklist |
 | `POST /api/key-info` | Read one key and its activations |
 | `POST /api/all-keys` | List all keys |
+| `POST /api/update-notes` | Update notes on an existing key |
 | `POST /api/toggle-key` | Enable or disable a key |
 | `POST /api/delete-key` | Delete a key and its device bindings |
 

@@ -209,10 +209,16 @@ function renderKeys() {
       <td><div class="ip-list">${executionIps}</div></td>
       <td><span title="${escapeHtml(formatKeyExpiryTitle(key))}">${escapeHtml(formatKeyExpiry(key))}</span></td>
       <td><span class="url-cell" title="${escapeHtml(key.script_url || "")}">${escapeHtml(key.script_url || "Not set")}</span></td>
-      <td>${escapeHtml(key.notes || "")}</td>
+      <td>
+        <div class="notes-control">
+          <input type="text" maxlength="500" value="${escapeHtml(key.notes || "")}" data-notes-input="${escapeHtml(key.key)}" aria-label="Notes for ${escapeHtml(key.key)}">
+          <button type="button" class="secondary" data-save-notes="${escapeHtml(key.key)}">Save</button>
+        </div>
+      </td>
       <td class="actions-cell">
         <div class="row-actions">
-          <button type="button" class="secondary" data-copy-loadstring="${escapeHtml(key.key)}">Copy</button>
+          <button type="button" class="secondary" data-copy-key="${escapeHtml(key.key)}">Copy Key</button>
+          <button type="button" class="secondary" data-copy-loadstring="${escapeHtml(key.key)}">Copy Loadstring</button>
           <button type="button" class="${key.is_active ? "danger" : ""}" data-toggle="${escapeHtml(key.key)}" data-active="${key.is_active ? "0" : "1"}">
             ${key.is_active ? "Disable" : "Enable"}
           </button>
@@ -391,16 +397,50 @@ $("keys-table").addEventListener("click", async (event) => {
   if (!button) return;
 
   const copyLoadstringKey = button.dataset.copyLoadstring;
+  const copyKey = button.dataset.copyKey;
+  const saveNotesKey = button.dataset.saveNotes;
   const toggleKey = button.dataset.toggle;
   const blacklistToggleKey = button.dataset.blacklistToggle;
   const deleteKey = button.dataset.delete;
+
+  if (copyKey) {
+    try {
+      await copyText(copyKey);
+      button.textContent = "Copied";
+      setTimeout(() => {
+        button.textContent = "Copy Key";
+      }, 900);
+    } catch (error) {
+      alert(error.message);
+    }
+    return;
+  }
 
   if (copyLoadstringKey) {
     try {
       await copyText(buildLoadstring(copyLoadstringKey));
       button.textContent = "Copied";
       setTimeout(() => {
-        button.textContent = "Copy";
+        button.textContent = "Copy Loadstring";
+      }, 900);
+    } catch (error) {
+      alert(error.message);
+    }
+    return;
+  }
+
+  if (saveNotesKey) {
+    const notesInput = button.closest("tr").querySelector("[data-notes-input]");
+    try {
+      await api("/api/update-notes", {
+        key: saveNotesKey,
+        notes: notesInput ? notesInput.value.trim() : "",
+      });
+      button.textContent = "Saved";
+      await loadAllKeys();
+      await loadAuditLogs();
+      setTimeout(() => {
+        button.textContent = "Save";
       }, 900);
     } catch (error) {
       alert(error.message);
