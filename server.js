@@ -156,6 +156,7 @@ async function initDatabase() {
       key_code TEXT UNIQUE NOT NULL,
       created_at ${USE_POSTGRES ? "TIMESTAMPTZ" : "TEXT"} NOT NULL DEFAULT CURRENT_TIMESTAMP,
       expires_at ${USE_POSTGRES ? "TIMESTAMPTZ" : "TEXT"},
+      expires_after_hours REAL,
       is_active INTEGER NOT NULL DEFAULT 1,
       max_devices INTEGER NOT NULL DEFAULT 1,
       product TEXT NOT NULL DEFAULT 'default',
@@ -165,6 +166,7 @@ async function initDatabase() {
   `);
   await ensureColumn("license_keys", "product", "TEXT NOT NULL DEFAULT 'default'");
   await ensureColumn("license_keys", "script_url", "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn("license_keys", "expires_after_hours", "REAL");
   await run(`
     CREATE TABLE IF NOT EXISTS key_devices (
       id ${USE_POSTGRES ? "SERIAL PRIMARY KEY" : "INTEGER PRIMARY KEY AUTOINCREMENT"},
@@ -401,6 +403,18 @@ function isExpired(keyRow) {
   return keyRow.expires_at && Date.now() > new Date(keyRow.expires_at).getTime();
 }
 
+async function startKeyTimerOnBind(keyRow) {
+  const expiresAfterHours = Number(keyRow.expires_after_hours || 0);
+  if (keyRow.expires_at || !Number.isFinite(expiresAfterHours) || expiresAfterHours <= 0) {
+    return keyRow.expires_at || null;
+  }
+
+  const expiresAt = new Date(Date.now() + expiresAfterHours * 60 * 60 * 1000).toISOString();
+  await run("UPDATE license_keys SET expires_at = ? WHERE id = ? AND expires_at IS NULL", [expiresAt, keyRow.id]);
+  keyRow.expires_at = expiresAt;
+  return expiresAt;
+}
+
 function executionIpsSelectSql() {
   if (USE_POSTGRES) {
     return "STRING_AGG(DISTINCT CASE WHEN kd.active = 1 THEN kd.last_ip ELSE NULL END, ',') AS execution_ips";
@@ -497,8 +511,9 @@ async function validateKeyForDevice({ keyCode, deviceId, userId, ip, product }) 
                    validation_count = key_devices.validation_count + 1`,
     [keyRow.id, deviceHash, userId, currentIp, currentIp]
   );
+  const expiresAt = await startKeyTimerOnBind(keyRow);
   await logUsage({ keyCode, deviceHash, userId, ip, action: "KEY_ACTIVATED" });
-  return { ok: true, keyRow, deviceHash, statusText: "activated", isNew: true };
+  return { ok: true, keyRow: { ...keyRow, expires_at: expiresAt }, deviceHash, statusText: "activated", isNew: true };
 }
 
 async function fetchScriptContent(scriptUrl) {
@@ -725,30 +740,29 @@ app.post("/api/generate-key", requireAdmin, asyncHandler(async (req, res) => {
   if (!scriptUrl) {
     return jsonError(res, 400, "Missing script URL", "missing_script_url");
   }
-  const expiresAt = !isLifetime && expiresInHours > 0
-    ? new Date(Date.now() + expiresInHours * 60 * 60 * 1000).toISOString()
-    : null;
+  const expiresAfterHours = !isLifetime && expiresInHours > 0 ? expiresInHours : null;
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const keyCode = generateKey();
     try {
       await run(
-        `INSERT INTO license_keys (key_code, expires_at, max_devices, product, script_url, notes)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [keyCode, expiresAt, maxDevices, req.adminProduct, scriptUrl, notes]
+        `INSERT INTO license_keys (key_code, expires_at, expires_after_hours, max_devices, product, script_url, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [keyCode, null, expiresAfterHours, maxDevices, req.adminProduct, scriptUrl, notes]
       );
       await logUsage({
         keyCode,
         ip: req.ip,
         action: "KEY_GENERATED",
-        details: JSON.stringify({ maxDevices, expiresAt, scriptUrl, product: req.adminProduct, adminActor }),
+        details: JSON.stringify({ maxDevices, expiresAfterHours, scriptUrl, product: req.adminProduct, adminActor }),
       });
       return res.json({
         success: true,
         product: req.adminProduct,
         productName: req.adminProductName,
         key: keyCode,
-        expiresAt,
+        expiresAt: null,
+        expiresAfterHours,
         maxUses: maxDevices,
         scriptUrl,
         loadstring: buildLoadstring(getPublicBaseUrl(req), keyCode, req.adminProduct),
@@ -1116,6 +1130,8 @@ function formatKeyRow(row) {
     product: row.product || "default",
     created_at: row.created_at,
     expires_at: row.expires_at,
+    expires_after_hours: row.expires_after_hours,
+    timer_pending: !row.expires_at && Number(row.expires_after_hours || 0) > 0,
     is_active: Boolean(row.is_active),
     max_uses: row.max_devices,
     max_devices: row.max_devices,

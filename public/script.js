@@ -18,6 +18,10 @@ function showResult(element, message, isError = false) {
 }
 
 function showGeneratedKey(element, data) {
+  const expiryText = data.expiresAt
+    ? formatExpires(data.expiresAt)
+    : formatPendingExpiry(data.expiresAfterHours);
+  const expiryTitle = data.expiresAt ? formatDate(data.expiresAt) : expiryText;
   element.classList.remove("is-hidden", "error");
   element.innerHTML = `
     <div class="generated-summary">
@@ -27,7 +31,7 @@ function showGeneratedKey(element, data) {
       </div>
       <div>
         <span>Expires</span>
-        <strong title="${escapeHtml(formatDate(data.expiresAt))}">${formatExpires(data.expiresAt)}</strong>
+        <strong title="${escapeHtml(expiryTitle)}">${escapeHtml(expiryText)}</strong>
       </div>
       <div>
         <span>Max devices</span>
@@ -127,6 +131,31 @@ function formatExpires(value) {
   return `${totalDays} day${totalDays === 1 ? "" : "s"} left`;
 }
 
+function formatDuration(hours) {
+  const totalHours = Number(hours || 0);
+  if (!Number.isFinite(totalHours) || totalHours <= 0) return "Never";
+  if (totalHours < 24) return `${Math.ceil(totalHours)} hr${Math.ceil(totalHours) === 1 ? "" : "s"}`;
+  const days = Math.ceil(totalHours / 24);
+  return `${days} day${days === 1 ? "" : "s"}`;
+}
+
+function formatPendingExpiry(hours) {
+  const duration = formatDuration(hours);
+  return duration === "Never" ? "Never" : `Starts on bind (${duration})`;
+}
+
+function formatKeyExpiry(key) {
+  if (key.expires_at) return formatExpires(key.expires_at);
+  if (key.timer_pending) return formatPendingExpiry(key.expires_after_hours);
+  return "Never";
+}
+
+function formatKeyExpiryTitle(key) {
+  if (key.expires_at) return formatDate(key.expires_at);
+  if (key.timer_pending) return `Timer starts when this key is first bound: ${formatDuration(key.expires_after_hours)}`;
+  return "Never";
+}
+
 function getKeyStatus(key) {
   if (!key.is_active) return { label: "Inactive", className: "status-inactive" };
   if (Number(key.blacklisted_count || 0) > 0) return { label: "Blacklisted", className: "status-expired" };
@@ -178,7 +207,7 @@ function renderKeys() {
       <td><span class="status-pill ${status.className}">${escapeHtml(status.label)}</span></td>
       <td>${Number(key.used_count || 0)}/${Number(key.max_uses || key.max_devices || 1)}</td>
       <td><div class="ip-list">${executionIps}</div></td>
-      <td><span title="${escapeHtml(formatDate(key.expires_at))}">${formatExpires(key.expires_at)}</span></td>
+      <td><span title="${escapeHtml(formatKeyExpiryTitle(key))}">${escapeHtml(formatKeyExpiry(key))}</span></td>
       <td><span class="url-cell" title="${escapeHtml(key.script_url || "")}">${escapeHtml(key.script_url || "Not set")}</span></td>
       <td>${escapeHtml(key.notes || "")}</td>
       <td class="actions-cell">
