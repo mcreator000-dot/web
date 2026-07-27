@@ -11,6 +11,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "dev-admin-token";
 const GHOST_T_ADMIN_TOKEN = process.env.GHOST_T_ADMIN_TOKEN || "dev-ghost-t-admin-token";
+const DISCORD_BOT_API_TOKEN = process.env.DISCORD_BOT_API_TOKEN || "";
 const DEVICE_HASH_SECRET = process.env.DEVICE_HASH_SECRET || "dev-device-secret";
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 const DEFAULT_SCRIPT_URL = process.env.DEFAULT_SCRIPT_URL || "";
@@ -43,7 +44,7 @@ if (DEVICE_HASH_SECRET === "dev-device-secret") {
 }
 
 const ADMIN_PRODUCTS = [
-  { token: ADMIN_TOKEN, product: "default", name: "Key System Manager", defaultScriptUrl: DEFAULT_SCRIPT_URL },
+  { token: ADMIN_TOKEN, product: "default", name: "GhostLua Key System", defaultScriptUrl: DEFAULT_SCRIPT_URL },
   { token: GHOST_T_ADMIN_TOKEN, product: "ghost_t", name: "Ghost T Key System", defaultScriptUrl: GHOST_T_SCRIPT_URL || DEFAULT_SCRIPT_URL },
 ];
 
@@ -292,6 +293,29 @@ function requireAdmin(req, res, next) {
   return next();
 }
 
+function requireDiscordBot(req, res, next) {
+  const auth = String(req.get("authorization") || "");
+  const bearerToken = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
+  const suppliedToken = req.get("x-discord-bot-token") || req.get("x-admin-token") || req.body.discordBotToken || bearerToken;
+  const routeProduct = normalizeProduct(req.discordProduct || req.body.product);
+  const productAdmin = routeProduct ? ADMIN_PRODUCTS.find((entry) => entry.product === routeProduct) : null;
+  const isDiscordToken = DISCORD_BOT_API_TOKEN ? timingSafeEqual(suppliedToken, DISCORD_BOT_API_TOKEN) : false;
+  const isProductAdminToken = productAdmin ? timingSafeEqual(suppliedToken, productAdmin.token) : false;
+
+  if (!isDiscordToken && !isProductAdminToken) {
+    return jsonError(res, 403, "Unauthorized", "unauthorized");
+  }
+
+  return next();
+}
+
+function setDiscordProduct(product) {
+  return (req, _res, next) => {
+    req.discordProduct = product;
+    next();
+  };
+}
+
 function normalizeKey(value) {
   return String(value || "").trim().toUpperCase();
 }
@@ -309,6 +333,12 @@ function normalizeAdminActor(req) {
 
 function normalizeDeviceId(req) {
   return String(req.body.deviceId || req.body.hwid || "").trim();
+}
+
+function normalizeDiscordActor(req) {
+  return String(req.body.discordUserId || req.body.userId || req.body.user || "discord-bot")
+    .trim()
+    .slice(0, 120);
 }
 
 function isLocalHostname(hostname) {
@@ -354,6 +384,123 @@ function buildLoadstring(baseUrl, keyCode, product) {
   const loaderUrl = `${baseUrl.replace(/\/+$/, "")}/api/loader`;
   const productPrefix = product ? `script_product="${product}"; ` : "";
   return `${productPrefix}script_key="${keyCode}"; loadstring(game:HttpGet("${loaderUrl}", true))()`;
+}
+
+function getAdminProduct(product, defaultProduct = "ghost_t") {
+  const normalizedProduct = normalizeProduct(product) || defaultProduct;
+  return ADMIN_PRODUCTS.find((entry) => entry.product === normalizedProduct) || ADMIN_PRODUCTS[0];
+}
+
+function normalizeDiscordRole(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function getDiscordRolePlan(req) {
+  const aliases = {
+    w: "week",
+    wweek: "week",
+    week: "week",
+    weekly: "week",
+    "1week": "week",
+    m: "month",
+    mmonth: "month",
+    month: "month",
+    monthly: "month",
+    "1month": "month",
+    "3m": "3months",
+    "3m3months": "3months",
+    threemonths: "3months",
+    "3month": "3months",
+    "3months": "3months",
+    "90days": "3months",
+    lt: "lifetime",
+    ltlifetime: "lifetime",
+    ltlife: "lifetime",
+    lifetime: "lifetime",
+    life: "lifetime",
+    forever: "lifetime",
+  };
+  const priority = ["lifetime", "3months", "month", "week"];
+  const rawRoles = Array.isArray(req.body.roles) ? req.body.roles : [];
+  const candidates = [
+    req.body.plan,
+    req.body.role,
+    req.body.roleName,
+    ...rawRoles.map((role) => (
+      typeof role === "string" ? role : role && (role.name || role.id || role.role || role.roleName)
+    )),
+  ];
+  const plans = candidates
+    .map((candidate) => aliases[normalizeDiscordRole(candidate)])
+    .filter(Boolean);
+
+  return priority.find((plan) => plans.includes(plan)) || null;
+}
+
+function getDiscordPlanRole(plan) {
+  const roles = {
+    week: "(w)-week",
+    month: "(m)-month",
+    "3months": "(3m)-3 months",
+    lifetime: "(Lt)-life time",
+  };
+  return roles[plan] || "";
+}
+
+function getDiscordAccessActions({ plan, expiresAt, isRedeemed = false }) {
+  return {
+    sourceRole: getDiscordPlanRole(plan),
+    grantRole: isRedeemed ? "private user" : null,
+    hideRedeemButton: Boolean(isRedeemed),
+    removeSourceRoleAt: expiresAt || null,
+    removePrivateUserRoleAt: expiresAt || null,
+  };
+}
+
+function getPlanFromKeyRow(keyRow) {
+  const hours = Number(keyRow && keyRow.expires_after_hours);
+  if (!Number.isFinite(hours) || hours <= 0) return "lifetime";
+  if (hours <= 7 * 24) return "week";
+  if (hours <= 30 * 24) return "month";
+  if (hours <= 90 * 24) return "3months";
+  return "lifetime";
+}
+
+function getDiscordPlanDuration(plan) {
+  const durations = {
+    week: 7 * 24,
+    month: 30 * 24,
+    "3months": 90 * 24,
+    lifetime: null,
+  };
+  return Object.prototype.hasOwnProperty.call(durations, plan) ? durations[plan] : undefined;
+}
+
+async function createLicenseKey({ product, scriptUrl, expiresAfterHours, maxDevices, notes, ip, actor }) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const keyCode = generateKey();
+    try {
+      await run(
+        `INSERT INTO license_keys (key_code, expires_at, expires_after_hours, max_devices, product, script_url, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [keyCode, null, expiresAfterHours, maxDevices, product, scriptUrl, notes]
+      );
+      await logUsage({
+        keyCode,
+        ip,
+        action: "KEY_GENERATED",
+        details: JSON.stringify({ maxDevices, expiresAfterHours, scriptUrl, product, adminActor: actor }),
+      });
+      return keyCode;
+    } catch (error) {
+      if (!isUniqueError(error)) throw error;
+    }
+  }
+
+  return null;
 }
 
 function hashDeviceId(deviceId) {
@@ -733,34 +880,28 @@ app.post("/api/generate-key", requireAdmin, asyncHandler(async (req, res) => {
   }
   const expiresAfterHours = !isLifetime && expiresInHours > 0 ? expiresInHours : null;
 
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const keyCode = generateKey();
-    try {
-      await run(
-        `INSERT INTO license_keys (key_code, expires_at, expires_after_hours, max_devices, product, script_url, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [keyCode, null, expiresAfterHours, maxDevices, req.adminProduct, scriptUrl, notes]
-      );
-      await logUsage({
-        keyCode,
-        ip: req.ip,
-        action: "KEY_GENERATED",
-        details: JSON.stringify({ maxDevices, expiresAfterHours, scriptUrl, product: req.adminProduct, adminActor }),
-      });
-      return res.json({
-        success: true,
-        product: req.adminProduct,
-        productName: req.adminProductName,
-        key: keyCode,
-        expiresAt: null,
-        expiresAfterHours,
-        maxUses: maxDevices,
-        scriptUrl,
-        loadstring: buildLoadstring(getPublicBaseUrl(req), keyCode, req.adminProduct),
-      });
-    } catch (error) {
-      if (!isUniqueError(error)) throw error;
-    }
+  const keyCode = await createLicenseKey({
+    product: req.adminProduct,
+    scriptUrl,
+    expiresAfterHours,
+    maxDevices,
+    notes,
+    ip: req.ip,
+    actor: adminActor,
+  });
+
+  if (keyCode) {
+    return res.json({
+      success: true,
+      product: req.adminProduct,
+      productName: req.adminProductName,
+      key: keyCode,
+      expiresAt: null,
+      expiresAfterHours,
+      maxUses: maxDevices,
+      scriptUrl,
+      loadstring: buildLoadstring(getPublicBaseUrl(req), keyCode, req.adminProduct),
+    });
   }
 
   return jsonError(res, 500, "Could not generate a unique key", "generation_failed");
@@ -849,6 +990,185 @@ app.post(["/api/reset-hwid", "/api/reset-device"], requireAdmin, asyncHandler(as
     changed: result.changes,
   });
 }));
+
+const discordGetKey = asyncHandler(async (req, res) => {
+  const plan = getDiscordRolePlan(req);
+  if (!plan) {
+    return jsonError(res, 400, "Missing Discord role plan. Use week, month, 3months, or lifetime.", "missing_role_plan");
+  }
+
+  const expiresAfterHours = getDiscordPlanDuration(plan);
+  if (expiresAfterHours === undefined) {
+    return jsonError(res, 400, "Unsupported Discord role plan", "unsupported_role_plan");
+  }
+
+  const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
+  const scriptUrl = normalizeScriptUrl(req.body.scriptUrl || adminProduct.defaultScriptUrl);
+  if (!scriptUrl) {
+    return jsonError(res, 400, "Missing script URL", "missing_script_url");
+  }
+
+  const maxDevices = Math.max(1, Number(req.body.maxUses || req.body.maxDevices || 1));
+  const actor = normalizeDiscordActor(req);
+  const notes = String(req.body.notes || `Discord ${plan} key for ${actor}`).slice(0, 500);
+  const keyCode = await createLicenseKey({
+    product: adminProduct.product,
+    scriptUrl,
+    expiresAfterHours,
+    maxDevices,
+    notes,
+    ip: req.ip,
+    actor,
+  });
+
+  if (!keyCode) {
+    return jsonError(res, 500, "Could not generate a unique key", "generation_failed");
+  }
+
+  return res.json({
+    success: true,
+    plan,
+    sourceRole: getDiscordPlanRole(plan),
+    product: adminProduct.product,
+    productName: adminProduct.name,
+    key: keyCode,
+    expiresAt: null,
+    expiresAfterHours,
+    maxUses: maxDevices,
+    scriptUrl,
+    loadstring: buildLoadstring(getPublicBaseUrl(req), keyCode, adminProduct.product),
+    discordAccess: getDiscordAccessActions({ plan, expiresAt: null, isRedeemed: false }),
+  });
+});
+
+const discordRedeemKey = asyncHandler(async (req, res) => {
+  const keyCode = normalizeKey(req.body.key);
+  const deviceId = normalizeDeviceId(req);
+  const userId = (req.body.discordUserId || req.body.userId) ? String(req.body.discordUserId || req.body.userId).slice(0, 128) : null;
+  const result = await validateKeyForDevice({
+    keyCode,
+    deviceId,
+    userId,
+    ip: req.ip,
+    product: req.discordProduct || req.body.product || "ghost_t",
+  });
+
+  if (!result.ok) {
+    return jsonError(res, result.status, result.message, result.code);
+  }
+
+  return res.json({
+    success: true,
+    message: result.isNew ? "Key redeemed successfully" : "Key already redeemed on this device",
+    status: result.statusText,
+    isNew: result.isNew,
+    expiresAt: result.keyRow.expires_at,
+    expiresAfterHours: result.keyRow.expires_after_hours,
+    plan: getPlanFromKeyRow(result.keyRow),
+    product: result.keyRow.product || "default",
+    discordAccess: getDiscordAccessActions({
+      plan: getPlanFromKeyRow(result.keyRow),
+      expiresAt: result.keyRow.expires_at,
+      isRedeemed: true,
+    }),
+    serverTime: new Date().toISOString(),
+  });
+});
+
+const discordResetHwid = asyncHandler(async (req, res) => {
+  const keyCode = normalizeKey(req.body.key);
+  const deviceId = normalizeDeviceId(req);
+  const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
+  const actor = normalizeDiscordActor(req);
+
+  if (!keyCode) {
+    return jsonError(res, 400, "Missing key", "missing_key");
+  }
+
+  const keyRow = await get("SELECT * FROM license_keys WHERE key_code = ? AND product = ?", [keyCode, adminProduct.product]);
+  if (!keyRow) {
+    return jsonError(res, 404, "Key not found", "not_found");
+  }
+
+  let result;
+  if (deviceId) {
+    const deviceHash = hashDeviceId(deviceId);
+    result = await run(
+      "UPDATE key_devices SET active = 0 WHERE key_id = ? AND device_hash = ?",
+      [keyRow.id, deviceHash]
+    );
+    await logUsage({ keyCode, deviceHash, ip: req.ip, action: "DISCORD_DEVICE_RESET", details: JSON.stringify({ adminActor: actor }) });
+  } else {
+    result = await run("UPDATE key_devices SET active = 0 WHERE key_id = ?", [keyRow.id]);
+    await logUsage({ keyCode, ip: req.ip, action: "DISCORD_ALL_DEVICES_RESET", details: JSON.stringify({ adminActor: actor }) });
+  }
+
+  return res.json({
+    success: true,
+    message: "Device binding reset successfully",
+    changed: result.changes,
+  });
+});
+
+const discordGetScript = asyncHandler(async (req, res) => {
+  const keyCode = normalizeKey(req.body.key);
+  const product = normalizeProduct(req.discordProduct || req.body.product || "ghost_t");
+
+  if (!keyCode) {
+    return jsonError(res, 400, "Missing key", "missing_key");
+  }
+
+  const keyRow = product
+    ? await get("SELECT * FROM license_keys WHERE key_code = ? AND product = ?", [keyCode, product])
+    : await get("SELECT * FROM license_keys WHERE key_code = ?", [keyCode]);
+  if (!keyRow) {
+    return jsonError(res, 404, "Key not found", "not_found");
+  }
+
+  if (!keyRow.is_active) {
+    return jsonError(res, 403, "Key is inactive", "inactive");
+  }
+
+  if (isExpired(keyRow)) {
+    return jsonError(res, 403, "Key has expired", "expired");
+  }
+
+  const activeDeviceCount = await getActiveDeviceCount(keyRow.id);
+  const plan = getPlanFromKeyRow(keyRow);
+
+  return res.json({
+    success: true,
+    key: keyRow.key_code,
+    product: keyRow.product || "default",
+    scriptUrl: keyRow.script_url || "",
+    loaderUrl: `${getPublicBaseUrl(req)}/api/loader`,
+    loadstring: buildLoadstring(getPublicBaseUrl(req), keyRow.key_code, keyRow.product || "default"),
+    expiresAt: keyRow.expires_at,
+    expiresAfterHours: keyRow.expires_after_hours,
+    plan,
+    redeemed: activeDeviceCount > 0,
+    discordAccess: getDiscordAccessActions({
+      plan,
+      expiresAt: keyRow.expires_at,
+      isRedeemed: activeDeviceCount > 0,
+    }),
+  });
+});
+
+app.post("/api/discord/get-key", requireDiscordBot, discordGetKey);
+app.post("/api/discord/redeem-key", requireDiscordBot, discordRedeemKey);
+app.post("/api/discord/reset-hwid", requireDiscordBot, discordResetHwid);
+app.post("/api/discord/get-script", requireDiscordBot, discordGetScript);
+
+app.post("/api/discord/ghostlua/get-key", setDiscordProduct("default"), requireDiscordBot, discordGetKey);
+app.post("/api/discord/ghostlua/redeem-key", setDiscordProduct("default"), requireDiscordBot, discordRedeemKey);
+app.post("/api/discord/ghostlua/reset-hwid", setDiscordProduct("default"), requireDiscordBot, discordResetHwid);
+app.post("/api/discord/ghostlua/get-script", setDiscordProduct("default"), requireDiscordBot, discordGetScript);
+
+app.post("/api/discord/ghost-t/get-key", setDiscordProduct("ghost_t"), requireDiscordBot, discordGetKey);
+app.post("/api/discord/ghost-t/redeem-key", setDiscordProduct("ghost_t"), requireDiscordBot, discordRedeemKey);
+app.post("/api/discord/ghost-t/reset-hwid", setDiscordProduct("ghost_t"), requireDiscordBot, discordResetHwid);
+app.post("/api/discord/ghost-t/get-script", setDiscordProduct("ghost_t"), requireDiscordBot, discordGetScript);
 
 app.post(["/api/blacklist-hwid", "/api/blacklist-device"], requireAdmin, asyncHandler(async (req, res) => {
   const deviceId = normalizeDeviceId(req);

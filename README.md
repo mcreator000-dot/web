@@ -36,6 +36,7 @@ Vercel serverless functions do not keep a local SQLite database between deployme
 ```text
 ADMIN_TOKEN=replace-with-a-long-random-admin-token
 GHOST_T_ADMIN_TOKEN=replace-with-a-long-random-ghost-t-admin-token
+DISCORD_BOT_API_TOKEN=
 DEVICE_HASH_SECRET=replace-with-a-long-random-device-secret
 CORS_ORIGIN=https://your-project.vercel.app
 PUBLIC_BASE_URL=https://your-project.vercel.app
@@ -61,6 +62,7 @@ npm install
 npx vercel
 npx vercel env add ADMIN_TOKEN production
 npx vercel env add GHOST_T_ADMIN_TOKEN production
+npx vercel env add DISCORD_BOT_API_TOKEN production
 npx vercel env add DEVICE_HASH_SECRET production
 npx vercel env add CORS_ORIGIN production
 npx vercel env add PUBLIC_BASE_URL production
@@ -92,6 +94,10 @@ Logging in with `GHOST_T_ADMIN_TOKEN` opens a separate Ghost T dashboard. Ghost 
 | `POST /api/update-notes` | Update notes on an existing key |
 | `POST /api/toggle-key` | Enable or disable a key |
 | `POST /api/delete-key` | Delete a key and its device bindings |
+| `POST /api/discord/get-key` | Generate a key for a Discord role plan |
+| `POST /api/discord/redeem-key` | Redeem and bind a key to a device |
+| `POST /api/discord/reset-hwid` | Reset a key binding from the Discord bot |
+| `POST /api/discord/get-script` | Return a key's loader URL and loadstring |
 
 ## Validation Request
 
@@ -137,9 +143,84 @@ Use `"expiresInUnit": "hours"` for hourly keys or `"expiresInUnit": "lifetime"` 
 
 Use scripts and script URLs you control. Keep admin tokens in environment variables only, and do not put secrets in distributed clients.
 
+## Discord Bot API
+
+Discord bot endpoints require either `X-Discord-Bot-Token: <DISCORD_BOT_API_TOKEN>` or `Authorization: Bearer <DISCORD_BOT_API_TOKEN>`. The product-specific routes also accept their matching dashboard token in `X-Admin-Token`.
+
+Use separate Discord API paths for each dashboard:
+
+| Dashboard | Product | Auth token accepted | Endpoints |
+| --- | --- | --- | --- |
+| GhostLua | `default` | `DISCORD_BOT_API_TOKEN` or `ADMIN_TOKEN` | `/api/discord/ghostlua/get-key`, `/api/discord/ghostlua/redeem-key`, `/api/discord/ghostlua/reset-hwid`, `/api/discord/ghostlua/get-script` |
+| Ghost T | `ghost_t` | `DISCORD_BOT_API_TOKEN` or `GHOST_T_ADMIN_TOKEN` | `/api/discord/ghost-t/get-key`, `/api/discord/ghost-t/redeem-key`, `/api/discord/ghost-t/reset-hwid`, `/api/discord/ghost-t/get-script` |
+
+The generic `/api/discord/get-key`, `/api/discord/redeem-key`, `/api/discord/reset-hwid`, and `/api/discord/get-script` endpoints still work when you pass `"product": "ghost_t"` or `"product": "default"`, but bots should prefer the dashboard-specific paths above.
+
+`POST /api/discord/get-key` creates a key based on the user's role. Send one role/plan or a full role list from Discord. If multiple supported roles are present, the server picks the best one in this order: `lifetime`, `3months`, `month`, `week`.
+
+```json
+{
+  "discordUserId": "123456789",
+  "roles": ["member", "month"],
+  "product": "ghost_t",
+  "maxDevices": 1
+}
+```
+
+Supported role names/aliases:
+
+| Role plan | Key duration |
+| --- | --- |
+| `(w)-week`, `w`, `week`, `weekly`, `1week` | 7 days |
+| `(m)-month`, `m`, `month`, `monthly`, `1month` | 30 days |
+| `(3m)-3 months`, `3m`, `3months`, `3month`, `threemonths`, `90days` | 90 days |
+| `(Lt)-life time`, `lt`, `lifetime`, `life`, `forever` | Never expires |
+
+Successful responses include `key`, `loadstring`, `scriptUrl`, `expiresAfterHours`, `plan`, `sourceRole`, and `discordAccess`.
+
+The Discord bot flow should be:
+
+1. A moderator gives the buyer one time role: `(w)-week`, `(m)-month`, `(3m)-3 months`, or `(Lt)-life time`.
+2. When the user presses Get Key, the bot sends the member's roles to the matching dashboard API.
+3. The API creates the key duration from the highest role found and returns the loadstring.
+4. When the user redeems the key, the API returns `discordAccess.grantRole: "private user"` and `discordAccess.hideRedeemButton: true`.
+5. The bot should grant `private user`, hide or disable the Redeem button for that user, and schedule removal of both `discordAccess.sourceRole` and `private user` at `discordAccess.removePrivateUserRoleAt`.
+6. Get Script should copy or DM only the returned `loadstring`.
+
+`POST /api/discord/redeem-key` validates and binds a key to a device/HWID:
+
+```json
+{
+  "key": "KEY-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX",
+  "hwid": "device-id-from-client",
+  "discordUserId": "123456789",
+  "product": "ghost_t"
+}
+```
+
+`POST /api/discord/reset-hwid` resets all active device bindings for a key when `hwid` is blank, or only one binding when `hwid` is supplied.
+
+```json
+{
+  "key": "KEY-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX",
+  "hwid": "optional-device-id",
+  "discordUserId": "admin-discord-id",
+  "product": "ghost_t"
+}
+```
+
+`POST /api/discord/get-script` returns the loader URL and ready-to-send loadstring for a valid active key:
+
+```json
+{
+  "key": "KEY-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX",
+  "product": "ghost_t"
+}
+```
+
 ## Security Notes
 
-- Production refuses to start with the development `ADMIN_TOKEN`, `GHOST_T_ADMIN_TOKEN`, or `DEVICE_HASH_SECRET`.
+- Production refuses to start with the development `ADMIN_TOKEN`, `GHOST_T_ADMIN_TOKEN`, or `DEVICE_HASH_SECRET`. `DISCORD_BOT_API_TOKEN` is optional because the product-specific Discord routes can use their matching dashboard token.
 - Generated keys use 25 random characters split across five groups.
 - Protected script URLs must use HTTPS unless they are localhost or `ALLOW_INSECURE_SCRIPT_URLS=true`.
 - Set `SCRIPT_URL_ALLOWLIST` to a comma-separated list of allowed script hostnames so new keys cannot point at arbitrary domains.
