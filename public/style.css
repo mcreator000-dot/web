@@ -220,6 +220,12 @@ h2 {
   gap: 8px;
 }
 
+.save-url-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
 .stacked-form {
   display: grid;
   gap: 12px;
@@ -505,6 +511,7 @@ td {
 
   .topbar-actions,
   .inline-form,
+  .save-url-control,
   .workspace-grid,
   .stats-grid,
   .form-grid {

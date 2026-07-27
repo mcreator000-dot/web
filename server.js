@@ -442,9 +442,13 @@ async function validateKeyForDevice({ keyCode, deviceId, userId, ip, product }) 
   }
 
   const normalizedProduct = normalizeProduct(product);
-  const keyRow = normalizedProduct
+  let keyRow = normalizedProduct
     ? await get("SELECT * FROM license_keys WHERE key_code = ? AND product = ?", [keyCode, normalizedProduct])
     : await get("SELECT * FROM license_keys WHERE key_code = ?", [keyCode]);
+
+  if (!keyRow && normalizedProduct) {
+    keyRow = await get("SELECT * FROM license_keys WHERE key_code = ?", [keyCode]);
+  }
   if (!keyRow) {
     await logUsage({ keyCode, deviceHash, userId, ip, action: "INVALID_KEY" });
     return { ok: false, status: 404, message: "Invalid key", code: "invalid" };
@@ -466,19 +470,6 @@ async function validateKeyForDevice({ keyCode, deviceId, userId, ip, product }) 
   );
 
   if (activation) {
-    const activationIp = activation.activation_ip ? String(activation.activation_ip) : null;
-    if (activationIp && currentIp && activationIp !== currentIp) {
-      await logUsage({
-        keyCode,
-        deviceHash,
-        userId,
-        ip,
-        action: "IP_MISMATCH",
-        details: JSON.stringify({ activationIp, currentIp }),
-      });
-      return { ok: false, status: 403, message: "Key is locked to another IP", code: "ip_mismatch" };
-    }
-
     await run(
       `UPDATE key_devices
        SET user_id = COALESCE(?, user_id),

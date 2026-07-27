@@ -119,7 +119,7 @@ The loadstring downloads the Lua loader from `GET /api/loader`. The loader posts
 
 For large obfuscated scripts, the loader tries a file-backed execution path first (`writefile` + `loadfile`) when the executor supports it, then falls back to `loadstring`.
 
-The dashboard shows execution IPs from active device bindings. `activation_ip` is the first IP that bound the key to that device, and `last_ip` is updated each time the key validates or the loader returns script content.
+The dashboard shows execution IPs from active device bindings. `activation_ip` is the first IP that bound the key to that device, and `last_ip` is updated each time the key validates or the loader returns script content. IP changes are tracked for audit visibility but do not invalidate an already-bound device.
 
 `POST /api/generate-key` accepts:
 

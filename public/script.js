@@ -3,6 +3,7 @@ let keys = [];
 let auditLogs = [];
 let product = "default";
 let productName = "Key System Manager";
+const SCRIPT_URL_STORAGE_KEY = "keySystemSavedScriptUrl";
 
 const $ = (id) => document.getElementById(id);
 
@@ -342,15 +343,17 @@ $("generate-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const output = $("generated-key");
   const expiresUnit = $("expires-unit").value;
+  const scriptUrl = $("script-url").value.trim();
 
   try {
     const data = await api("/api/generate-key", {
       expiresIn: expiresUnit === "lifetime" ? 0 : Number($("expires-in").value || 0),
       expiresInUnit: expiresUnit,
       maxUses: Number($("max-uses").value || 1),
-      scriptUrl: $("script-url").value.trim(),
+      scriptUrl,
       notes: $("notes").value.trim(),
     });
+    saveScriptUrl(scriptUrl, false);
     showGeneratedKey(output, data);
     await loadAllKeys();
     await loadAuditLogs();
@@ -366,6 +369,32 @@ function updateDurationControls() {
 }
 
 $("expires-unit").addEventListener("change", updateDurationControls);
+
+function saveScriptUrl(value, showMessage = true) {
+  const scriptUrl = String(value || "").trim();
+  if (!scriptUrl) return;
+
+  localStorage.setItem(SCRIPT_URL_STORAGE_KEY, scriptUrl);
+  $("script-url").value = scriptUrl;
+
+  const button = $("save-script-url");
+  if (button && showMessage) {
+    button.textContent = "Saved";
+    setTimeout(() => {
+      button.textContent = "Save";
+    }, 900);
+  }
+}
+
+$("save-script-url").addEventListener("click", () => {
+  const input = $("script-url");
+
+  if (!input.reportValidity()) {
+    return;
+  }
+
+  saveScriptUrl(input.value);
+});
 
 $("reset-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -520,6 +549,11 @@ document.addEventListener("click", async (event) => {
 
 renderIntegrationSnippets();
 updateDurationControls();
+
+const savedScriptUrl = localStorage.getItem(SCRIPT_URL_STORAGE_KEY);
+if (savedScriptUrl) {
+  $("script-url").value = savedScriptUrl;
+}
 
 if (adminToken) {
   $("admin-token").value = adminToken;
