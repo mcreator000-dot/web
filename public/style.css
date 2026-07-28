@@ -27,7 +27,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -56,7 +57,8 @@ button.danger {
   color: white;
 }
 
-input {
+input,
+select {
   width: 100%;
   min-height: 40px;
   border: 1px solid var(--line);
@@ -67,7 +69,8 @@ input {
   outline: none;
 }
 
-input:focus {
+input:focus,
+select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.16);
 }
@@ -160,6 +163,10 @@ h2 {
   gap: 10px;
 }
 
+.topbar-actions input {
+  width: 180px;
+}
+
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -205,6 +212,18 @@ h2 {
 
 .form-grid button {
   width: fit-content;
+}
+
+.duration-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 110px;
+  gap: 8px;
+}
+
+.save-url-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
 }
 
 .stacked-form {
@@ -330,6 +349,23 @@ h2 {
   font-size: 0.8rem;
 }
 
+.notes-control {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto;
+  gap: 8px;
+  min-width: 240px;
+}
+
+.notes-control input {
+  min-height: 32px;
+}
+
+.notes-control button {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 0.8rem;
+}
+
 pre {
   margin: 0;
   max-height: 300px;
@@ -435,6 +471,11 @@ td {
   color: #93c5fd;
 }
 
+.status-paused {
+  background: rgba(168, 85, 247, 0.14);
+  color: #d8b4fe;
+}
+
 .status-expired,
 .status-inactive {
   background: rgba(245, 158, 11, 0.14);
@@ -475,6 +516,7 @@ td {
 
   .topbar-actions,
   .inline-form,
+  .save-url-control,
   .workspace-grid,
   .stats-grid,
   .form-grid {
