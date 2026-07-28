@@ -27,8 +27,7 @@ body {
 }
 
 button,
-input,
-select {
+input {
   font: inherit;
 }
 
@@ -57,8 +56,7 @@ button.danger {
   color: white;
 }
 
-input,
-select {
+input {
   width: 100%;
   min-height: 40px;
   border: 1px solid var(--line);
@@ -69,8 +67,7 @@ select {
   outline: none;
 }
 
-input:focus,
-select:focus {
+input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.16);
 }
@@ -163,10 +160,6 @@ h2 {
   gap: 10px;
 }
 
-.topbar-actions input {
-  width: 180px;
-}
-
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -212,18 +205,6 @@ h2 {
 
 .form-grid button {
   width: fit-content;
-}
-
-.duration-control {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 110px;
-  gap: 8px;
-}
-
-.save-url-control {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
 }
 
 .stacked-form {
@@ -345,23 +326,6 @@ h2 {
 
 .snippet-head button {
   min-height: 30px;
-  padding: 0 10px;
-  font-size: 0.8rem;
-}
-
-.notes-control {
-  display: grid;
-  grid-template-columns: minmax(160px, 1fr) auto;
-  gap: 8px;
-  min-width: 240px;
-}
-
-.notes-control input {
-  min-height: 32px;
-}
-
-.notes-control button {
-  min-height: 32px;
   padding: 0 10px;
   font-size: 0.8rem;
 }
@@ -511,7 +475,6 @@ td {
 
   .topbar-actions,
   .inline-form,
-  .save-url-control,
   .workspace-grid,
   .stats-grid,
   .form-grid {
