@@ -1,5 +1,9 @@
 let adminToken = sessionStorage.getItem("keySystemAdminToken") || "";
 let keys = [];
+let auditLogs = [];
+let product = "default";
+let productName = "Key System Manager";
+const SCRIPT_URL_STORAGE_KEY = "keySystemSavedScriptUrl";
 
 const $ = (id) => document.getElementById(id);
 
@@ -15,6 +19,10 @@ function showResult(element, message, isError = false) {
 }
 
 function showGeneratedKey(element, data) {
+  const expiryText = data.expiresAt
+    ? formatExpires(data.expiresAt)
+    : formatPendingExpiry(data.expiresAfterHours);
+  const expiryTitle = data.expiresAt ? formatDate(data.expiresAt) : expiryText;
   element.classList.remove("is-hidden", "error");
   element.innerHTML = `
     <div class="generated-summary">
@@ -24,7 +32,7 @@ function showGeneratedKey(element, data) {
       </div>
       <div>
         <span>Expires</span>
-        <strong>${formatDate(data.expiresAt)}</strong>
+        <strong title="${escapeHtml(expiryTitle)}">${escapeHtml(expiryText)}</strong>
       </div>
       <div>
         <span>Max devices</span>
@@ -46,13 +54,16 @@ function showGeneratedKey(element, data) {
 }
 
 async function api(path, body = {}) {
+  const adminActorInput = $("admin-actor");
+  const adminActor = adminActorInput ? adminActorInput.value.trim() : "";
+  const payload = adminActor ? { ...body, adminActor } : body;
   const response = await fetch(path, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "X-Admin-Token": adminToken,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(payload),
   });
 
   const data = await response.json().catch(() => ({}));
@@ -94,7 +105,81 @@ function formatDate(value) {
   return Number.isNaN(date.getTime()) ? "Never" : date.toLocaleDateString();
 }
 
+function formatDateTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+}
+
+function formatExpires(value) {
+  if (!value) return "Never";
+  const expiresAt = new Date(value).getTime();
+  if (Number.isNaN(expiresAt)) return "Never";
+
+  const diffMs = expiresAt - Date.now();
+  if (diffMs <= 0) return "Expired";
+
+  const totalMinutes = Math.ceil(diffMs / 60000);
+  const totalHours = Math.ceil(diffMs / 3600000);
+  const totalDays = Math.ceil(diffMs / 86400000);
+
+  if (totalMinutes < 60) {
+    return `${totalMinutes} min left`;
+  }
+  if (totalHours < 48) {
+    return `${totalHours} hr${totalHours === 1 ? "" : "s"} left`;
+  }
+  return `${totalDays} day${totalDays === 1 ? "" : "s"} left`;
+}
+
+function formatDuration(hours) {
+  const totalHours = Number(hours || 0);
+  if (!Number.isFinite(totalHours) || totalHours <= 0) return "Never";
+  if (totalHours < 24) return `${Math.ceil(totalHours)} hr${Math.ceil(totalHours) === 1 ? "" : "s"}`;
+  const days = Math.ceil(totalHours / 24);
+  return `${days} day${days === 1 ? "" : "s"}`;
+}
+
+function formatSeconds(seconds) {
+  const totalSeconds = Math.max(0, Number(seconds || 0));
+  if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) return "";
+
+  const totalMinutes = Math.ceil(totalSeconds / 60);
+  const totalHours = Math.ceil(totalSeconds / 3600);
+  const totalDays = Math.ceil(totalSeconds / 86400);
+
+  if (totalMinutes < 60) return `${totalMinutes} min left`;
+  if (totalHours < 48) return `${totalHours} hr${totalHours === 1 ? "" : "s"} left`;
+  return `${totalDays} day${totalDays === 1 ? "" : "s"} left`;
+}
+
+function formatPendingExpiry(hours) {
+  const duration = formatDuration(hours);
+  return duration === "Never" ? "Never" : `Starts on bind (${duration})`;
+}
+
+function formatKeyExpiry(key) {
+  if (key.is_paused) {
+    const remaining = formatSeconds(key.paused_remaining_seconds);
+    return remaining ? `Paused (${remaining})` : "Paused";
+  }
+  if (key.expires_at) return formatExpires(key.expires_at);
+  if (key.timer_pending) return formatPendingExpiry(key.expires_after_hours);
+  return "Never";
+}
+
+function formatKeyExpiryTitle(key) {
+  if (key.is_paused) {
+    const remaining = formatSeconds(key.paused_remaining_seconds);
+    return remaining ? `Timer paused with ${remaining}` : `Timer paused${key.paused_at ? ` at ${formatDateTime(key.paused_at)}` : ""}`;
+  }
+  if (key.expires_at) return formatDate(key.expires_at);
+  if (key.timer_pending) return `Timer starts when this key is first bound: ${formatDuration(key.expires_after_hours)}`;
+  return "Never";
+}
+
 function getKeyStatus(key) {
+  if (key.is_paused) return { label: "Paused", className: "status-paused" };
   if (!key.is_active) return { label: "Inactive", className: "status-inactive" };
   if (Number(key.blacklisted_count || 0) > 0) return { label: "Blacklisted", className: "status-expired" };
   if (key.expired) return { label: "Expired", className: "status-expired" };
@@ -106,6 +191,11 @@ function renderStats() {
   $("stat-total").textContent = keys.length;
   $("stat-active").textContent = keys.filter((key) => key.is_active && !key.expired).length;
   $("stat-bound").textContent = keys.reduce((total, key) => total + Number(key.used_count || 0), 0);
+}
+
+function renderProduct() {
+  $("dashboard-title").textContent = productName;
+  $("dashboard-product").textContent = productName === "Ghost T Key System" ? "Ghost T Dashboard" : "Dashboard";
 }
 
 function renderKeys() {
@@ -140,14 +230,23 @@ function renderKeys() {
       <td><span class="status-pill ${status.className}">${escapeHtml(status.label)}</span></td>
       <td>${Number(key.used_count || 0)}/${Number(key.max_uses || key.max_devices || 1)}</td>
       <td><div class="ip-list">${executionIps}</div></td>
-      <td>${formatDate(key.expires_at)}</td>
+      <td><span title="${escapeHtml(formatKeyExpiryTitle(key))}">${escapeHtml(formatKeyExpiry(key))}</span></td>
       <td><span class="url-cell" title="${escapeHtml(key.script_url || "")}">${escapeHtml(key.script_url || "Not set")}</span></td>
-      <td>${escapeHtml(key.notes || "")}</td>
+      <td>
+        <div class="notes-control">
+          <input type="text" maxlength="500" value="${escapeHtml(key.notes || "")}" data-notes-input="${escapeHtml(key.key)}" aria-label="Notes for ${escapeHtml(key.key)}">
+          <button type="button" class="secondary" data-save-notes="${escapeHtml(key.key)}">Save</button>
+        </div>
+      </td>
       <td class="actions-cell">
         <div class="row-actions">
-          <button type="button" class="secondary" data-copy-loadstring="${escapeHtml(key.key)}">Copy</button>
+          <button type="button" class="secondary" data-copy-key="${escapeHtml(key.key)}">Copy Key</button>
+          <button type="button" class="secondary" data-copy-loadstring="${escapeHtml(key.key)}">Copy Loadstring</button>
           <button type="button" class="${key.is_active ? "danger" : ""}" data-toggle="${escapeHtml(key.key)}" data-active="${key.is_active ? "0" : "1"}">
             ${key.is_active ? "Disable" : "Enable"}
+          </button>
+          <button type="button" class="${key.is_paused ? "secondary" : "danger"}" data-pause="${escapeHtml(key.key)}" data-paused="${key.is_paused ? "1" : "0"}">
+            ${key.is_paused ? "Resume" : "Pause"}
           </button>
           <button type="button" class="${isBlacklisted ? "secondary" : "danger"}" data-blacklist-toggle="${escapeHtml(key.key)}" data-blacklisted="${isBlacklisted ? "1" : "0"}">
             ${isBlacklisted ? "Unblacklist" : "Blacklist"}
@@ -155,6 +254,35 @@ function renderKeys() {
           <button type="button" class="danger" data-delete="${escapeHtml(key.key)}">Remove</button>
         </div>
       </td>
+    `;
+    table.appendChild(row);
+  }
+}
+
+function renderAuditLogs() {
+  const table = $("audit-table");
+  table.innerHTML = "";
+
+  if (!auditLogs.length) {
+    const row = document.createElement("tr");
+    row.innerHTML = '<td colspan="7">No audit events yet.</td>';
+    table.appendChild(row);
+    return;
+  }
+
+  for (const entry of auditLogs) {
+    const details = entry.reason || (
+      entry.details && entry.details.count !== undefined ? `Count: ${entry.details.count}` : ""
+    );
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td>${escapeHtml(formatDateTime(entry.timestamp))}</td>
+      <td>${escapeHtml(entry.action || "")}</td>
+      <td><span class="key-code">${escapeHtml(entry.key || "")}</span></td>
+      <td>${escapeHtml(entry.userId || "")}</td>
+      <td>${escapeHtml(entry.adminActor || "")}</td>
+      <td>${escapeHtml(entry.ip || "")}</td>
+      <td>${escapeHtml(details)}</td>
     `;
     table.appendChild(row);
   }
@@ -171,8 +299,9 @@ function escapeHtml(value) {
 
 function renderIntegrationSnippets() {
   const loaderUrl = `${window.location.origin}/api/loader`;
+  const productPrefix = product === "ghost_t" ? 'script_product="ghost_t"; ' : "";
 
-  $("curl-snippet").textContent = `script_key="KEY-ABCD-EFGH-JKLM-NPQR"; loadstring(game:HttpGet("${loaderUrl}", true))()`;
+  $("curl-snippet").textContent = `${productPrefix}script_key="KEY-ABCD-EFGH-JKLM-NPQR"; loadstring(game:HttpGet("${loaderUrl}", true))()`;
 
   $("js-snippet").textContent = [
     `GET  ${loaderUrl}`,
@@ -184,14 +313,24 @@ function renderIntegrationSnippets() {
 }
 
 function buildLoadstring(key) {
-  return `script_key="${key}"; loadstring(game:HttpGet("${window.location.origin}/api/loader", true))()`;
+  const productPrefix = product === "ghost_t" ? 'script_product="ghost_t"; ' : "";
+  return `${productPrefix}script_key="${key}"; loadstring(game:HttpGet("${window.location.origin}/api/loader", true))()`;
 }
 
 async function loadAllKeys() {
   const data = await api("/api/all-keys");
+  product = data.product || "default";
+  productName = data.productName || "Key System Manager";
   keys = data.data || [];
+  renderProduct();
   renderStats();
   renderKeys();
+}
+
+async function loadAuditLogs() {
+  const data = await api("/api/audit-logs", { limit: 80 });
+  auditLogs = data.data || [];
+  renderAuditLogs();
 }
 
 $("login-form").addEventListener("submit", async (event) => {
@@ -202,6 +341,7 @@ $("login-form").addEventListener("submit", async (event) => {
   try {
     sessionStorage.setItem("keySystemAdminToken", adminToken);
     await loadAllKeys();
+    await loadAuditLogs();
     show("dashboard");
   } catch (error) {
     sessionStorage.removeItem("keySystemAdminToken");
@@ -217,25 +357,68 @@ $("logout").addEventListener("click", () => {
 });
 
 $("refresh-keys").addEventListener("click", () => {
-  loadAllKeys().catch((error) => alert(error.message));
+  Promise.all([loadAllKeys(), loadAuditLogs()]).catch((error) => alert(error.message));
+});
+
+$("refresh-audit").addEventListener("click", () => {
+  loadAuditLogs().catch((error) => alert(error.message));
 });
 
 $("generate-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const output = $("generated-key");
+  const expiresUnit = $("expires-unit").value;
+  const scriptUrl = $("script-url").value.trim();
 
   try {
     const data = await api("/api/generate-key", {
-      expiresInDays: Number($("expires-in").value || 0),
+      expiresIn: expiresUnit === "lifetime" ? 0 : Number($("expires-in").value || 0),
+      expiresInUnit: expiresUnit,
       maxUses: Number($("max-uses").value || 1),
-      scriptUrl: $("script-url").value.trim(),
+      scriptUrl,
       notes: $("notes").value.trim(),
     });
+    saveScriptUrl(scriptUrl, false);
     showGeneratedKey(output, data);
     await loadAllKeys();
+    await loadAuditLogs();
   } catch (error) {
     showResult(output, error.message, true);
   }
+});
+
+function updateDurationControls() {
+  const isLifetime = $("expires-unit").value === "lifetime";
+  $("expires-in").disabled = isLifetime;
+  $("expires-in").required = !isLifetime;
+}
+
+$("expires-unit").addEventListener("change", updateDurationControls);
+
+function saveScriptUrl(value, showMessage = true) {
+  const scriptUrl = String(value || "").trim();
+  if (!scriptUrl) return;
+
+  localStorage.setItem(SCRIPT_URL_STORAGE_KEY, scriptUrl);
+  $("script-url").value = scriptUrl;
+
+  const button = $("save-script-url");
+  if (button && showMessage) {
+    button.textContent = "Saved";
+    setTimeout(() => {
+      button.textContent = "Save";
+    }, 900);
+  }
+}
+
+$("save-script-url").addEventListener("click", () => {
+  const input = $("script-url");
+
+  if (!input.reportValidity()) {
+    return;
+  }
+
+  saveScriptUrl(input.value);
 });
 
 $("reset-form").addEventListener("submit", async (event) => {
@@ -249,6 +432,7 @@ $("reset-form").addEventListener("submit", async (event) => {
     });
     showResult(output, `${data.message}. Updated rows: ${data.changed}`);
     await loadAllKeys();
+    await loadAuditLogs();
   } catch (error) {
     showResult(output, error.message, true);
   }
@@ -256,21 +440,62 @@ $("reset-form").addEventListener("submit", async (event) => {
 
 $("key-filter").addEventListener("input", renderKeys);
 
+setInterval(() => {
+  if (!$("dashboard-view").classList.contains("is-hidden")) {
+    renderKeys();
+  }
+}, 60000);
+
 $("keys-table").addEventListener("click", async (event) => {
   const button = event.target.closest("button");
   if (!button) return;
 
   const copyLoadstringKey = button.dataset.copyLoadstring;
+  const copyKey = button.dataset.copyKey;
+  const saveNotesKey = button.dataset.saveNotes;
   const toggleKey = button.dataset.toggle;
+  const pauseKey = button.dataset.pause;
   const blacklistToggleKey = button.dataset.blacklistToggle;
   const deleteKey = button.dataset.delete;
+
+  if (copyKey) {
+    try {
+      await copyText(copyKey);
+      button.textContent = "Copied";
+      setTimeout(() => {
+        button.textContent = "Copy Key";
+      }, 900);
+    } catch (error) {
+      alert(error.message);
+    }
+    return;
+  }
 
   if (copyLoadstringKey) {
     try {
       await copyText(buildLoadstring(copyLoadstringKey));
       button.textContent = "Copied";
       setTimeout(() => {
-        button.textContent = "Copy";
+        button.textContent = "Copy Loadstring";
+      }, 900);
+    } catch (error) {
+      alert(error.message);
+    }
+    return;
+  }
+
+  if (saveNotesKey) {
+    const notesInput = button.closest("tr").querySelector("[data-notes-input]");
+    try {
+      await api("/api/update-notes", {
+        key: saveNotesKey,
+        notes: notesInput ? notesInput.value.trim() : "",
+      });
+      button.textContent = "Saved";
+      await loadAllKeys();
+      await loadAuditLogs();
+      setTimeout(() => {
+        button.textContent = "Save";
       }, 900);
     } catch (error) {
       alert(error.message);
@@ -285,6 +510,21 @@ $("keys-table").addEventListener("click", async (event) => {
         isActive: button.dataset.active === "1",
       });
       await loadAllKeys();
+      await loadAuditLogs();
+    } catch (error) {
+      alert(error.message);
+    }
+    return;
+  }
+
+  if (pauseKey) {
+    try {
+      await api("/api/pause-key", {
+        key: pauseKey,
+        pause: button.dataset.paused !== "1",
+      });
+      await loadAllKeys();
+      await loadAuditLogs();
     } catch (error) {
       alert(error.message);
     }
@@ -306,6 +546,7 @@ $("keys-table").addEventListener("click", async (event) => {
       });
       showResult($("device-result"), `${data.message}. Updated rows: ${data.changed}`);
       await loadAllKeys();
+      await loadAuditLogs();
     } catch (error) {
       showResult($("device-result"), error.message, true);
     }
@@ -319,6 +560,7 @@ $("keys-table").addEventListener("click", async (event) => {
     try {
       await api("/api/delete-key", { key: deleteKey });
       await loadAllKeys();
+      await loadAuditLogs();
     } catch (error) {
       alert(error.message);
     }
@@ -346,6 +588,12 @@ document.addEventListener("click", async (event) => {
 });
 
 renderIntegrationSnippets();
+updateDurationControls();
+
+const savedScriptUrl = localStorage.getItem(SCRIPT_URL_STORAGE_KEY);
+if (savedScriptUrl) {
+  $("script-url").value = savedScriptUrl;
+}
 
 if (adminToken) {
   $("admin-token").value = adminToken;
