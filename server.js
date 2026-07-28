@@ -617,6 +617,7 @@ async function validateKeyForDevice({ keyCode, deviceId, userId, ip, product }) 
   );
 
   if (activation) {
+    const expiresAt = await startKeyTimerOnBind(keyRow);
     await run(
       `UPDATE key_devices
        SET user_id = COALESCE(?, user_id),
@@ -628,7 +629,7 @@ async function validateKeyForDevice({ keyCode, deviceId, userId, ip, product }) 
       [userId, currentIp, currentIp, activation.id]
     );
     await logUsage({ keyCode, deviceHash, userId, ip, action: "KEY_VALIDATED" });
-    return { ok: true, keyRow, deviceHash, statusText: "validated", isNew: false };
+    return { ok: true, keyRow: { ...keyRow, expires_at: expiresAt }, deviceHash, statusText: "validated", isNew: false };
   }
 
   const activeDeviceCount = await getActiveDeviceCount(keyRow.id);
