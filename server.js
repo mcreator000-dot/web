@@ -11,7 +11,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "dev-admin-token";
 const GHOST_T_ADMIN_TOKEN = process.env.GHOST_T_ADMIN_TOKEN || "dev-ghost-t-admin-token";
-const DP_ADMIN_TOKEN = process.env.DP_ADMIN_TOKEN || "dev-dp-admin-token";
+const DP_ADMIN_TOKEN = process.env.DP_ADMIN_TOKEN || "";
 const DISCORD_BOT_API_TOKEN = process.env.DISCORD_BOT_API_TOKEN || "";
 const DEVICE_HASH_SECRET = process.env.DEVICE_HASH_SECRET || "dev-device-secret";
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
@@ -41,8 +41,8 @@ if (GHOST_T_ADMIN_TOKEN === "dev-ghost-t-admin-token") {
   console.warn("GHOST_T_ADMIN_TOKEN is not set. Using development token: dev-ghost-t-admin-token");
 }
 
-if (DP_ADMIN_TOKEN === "dev-dp-admin-token") {
-  console.warn("DP_ADMIN_TOKEN is not set. Using development token: dev-dp-admin-token");
+if (!DP_ADMIN_TOKEN) {
+  console.warn("DP_ADMIN_TOKEN is not set. DP dashboard routes are disabled until it is configured.");
 }
 
 if (DEVICE_HASH_SECRET === "dev-device-secret") {
@@ -52,7 +52,9 @@ if (DEVICE_HASH_SECRET === "dev-device-secret") {
 const ADMIN_PRODUCTS = [
   { token: ADMIN_TOKEN, product: "default", name: "GhostLua Key System", defaultScriptUrl: DEFAULT_SCRIPT_URL },
   { token: GHOST_T_ADMIN_TOKEN, product: "ghost_t", name: "Ghost T Key System", defaultScriptUrl: GHOST_T_SCRIPT_URL || DEFAULT_SCRIPT_URL },
-  { token: DP_ADMIN_TOKEN, product: "dp", name: "DP Key System", defaultScriptUrl: DP_SCRIPT_URL || DEFAULT_SCRIPT_URL },
+  ...(DP_ADMIN_TOKEN
+    ? [{ token: DP_ADMIN_TOKEN, product: "dp", name: "DP Key System", defaultScriptUrl: DP_SCRIPT_URL || DEFAULT_SCRIPT_URL }]
+    : []),
 ];
 
 function assertProductionConfig() {
@@ -61,7 +63,6 @@ function assertProductionConfig() {
   const failures = [];
   if (ADMIN_TOKEN === "dev-admin-token") failures.push("ADMIN_TOKEN");
   if (GHOST_T_ADMIN_TOKEN === "dev-ghost-t-admin-token") failures.push("GHOST_T_ADMIN_TOKEN");
-  if (DP_ADMIN_TOKEN === "dev-dp-admin-token") failures.push("DP_ADMIN_TOKEN");
   if (DEVICE_HASH_SECRET === "dev-device-secret") failures.push("DEVICE_HASH_SECRET");
   if (!process.env.PUBLIC_BASE_URL && !process.env.VERCEL_PROJECT_PRODUCTION_URL) failures.push("PUBLIC_BASE_URL");
 
@@ -399,7 +400,9 @@ function buildLoadstring(baseUrl, keyCode, product) {
 }
 
 function getAdminProduct(product, defaultProduct = "ghost_t") {
-  const normalizedProduct = normalizeProduct(product) || defaultProduct;
+  const requestedProduct = String(product || "").trim();
+  const normalizedProduct = normalizeProduct(requestedProduct) || (requestedProduct ? null : defaultProduct);
+  if (!normalizedProduct) return null;
   return ADMIN_PRODUCTS.find((entry) => entry.product === normalizedProduct) || ADMIN_PRODUCTS[0];
 }
 
@@ -605,7 +608,13 @@ async function validateKeyForDevice({ keyCode, deviceId, userId, ip, product }) 
     return { ok: false, status: 403, message: "This device is blacklisted", code: "blacklisted" };
   }
 
-  const normalizedProduct = normalizeProduct(product);
+  const requestedProduct = String(product || "").trim();
+  const normalizedProduct = normalizeProduct(requestedProduct);
+  if (requestedProduct && !normalizedProduct) {
+    await logUsage({ keyCode, deviceHash, userId, ip, action: "INVALID_PRODUCT", details: JSON.stringify({ product: requestedProduct }) });
+    return { ok: false, status: 404, message: "Invalid product", code: "invalid_product" };
+  }
+
   let keyRow = normalizedProduct
     ? await get("SELECT * FROM license_keys WHERE key_code = ? AND product = ?", [keyCode, normalizedProduct])
     : await get("SELECT * FROM license_keys WHERE key_code = ?", [keyCode]);
@@ -1023,6 +1032,10 @@ const discordGetKey = asyncHandler(async (req, res) => {
   }
 
   const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
+  if (!adminProduct) {
+    return jsonError(res, 400, "Invalid product", "invalid_product");
+  }
+
   const scriptUrl = normalizeScriptUrl(req.body.scriptUrl || adminProduct.defaultScriptUrl);
   if (!scriptUrl) {
     return jsonError(res, 400, "Missing script URL", "missing_script_url");
@@ -1099,6 +1112,10 @@ const discordResetHwid = asyncHandler(async (req, res) => {
   const keyCode = normalizeKey(req.body.key);
   const deviceId = normalizeDeviceId(req);
   const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
+  if (!adminProduct) {
+    return jsonError(res, 400, "Invalid product", "invalid_product");
+  }
+
   const actor = normalizeDiscordActor(req);
 
   if (!keyCode) {
@@ -1132,10 +1149,15 @@ const discordResetHwid = asyncHandler(async (req, res) => {
 
 const discordGetScript = asyncHandler(async (req, res) => {
   const keyCode = normalizeKey(req.body.key);
-  const product = normalizeProduct(req.discordProduct || req.body.product || "ghost_t");
+  const requestedProduct = String(req.discordProduct || req.body.product || "ghost_t").trim();
+  const product = normalizeProduct(requestedProduct);
 
   if (!keyCode) {
     return jsonError(res, 400, "Missing key", "missing_key");
+  }
+
+  if (requestedProduct && !product) {
+    return jsonError(res, 400, "Invalid product", "invalid_product");
   }
 
   const keyRow = product
