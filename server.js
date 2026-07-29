@@ -11,11 +11,13 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "dev-admin-token";
 const GHOST_T_ADMIN_TOKEN = process.env.GHOST_T_ADMIN_TOKEN || "dev-ghost-t-admin-token";
+const DP_ADMIN_TOKEN = process.env.DP_ADMIN_TOKEN || "dev-dp-admin-token";
 const DISCORD_BOT_API_TOKEN = process.env.DISCORD_BOT_API_TOKEN || "";
 const DEVICE_HASH_SECRET = process.env.DEVICE_HASH_SECRET || "dev-device-secret";
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 const DEFAULT_SCRIPT_URL = process.env.DEFAULT_SCRIPT_URL || "";
 const GHOST_T_SCRIPT_URL = process.env.GHOST_T_SCRIPT_URL || "";
+const DP_SCRIPT_URL = process.env.DP_SCRIPT_URL || "";
 const MAX_SCRIPT_BYTES = Number(process.env.MAX_SCRIPT_BYTES || 5 * 1024 * 1024);
 const SCRIPT_URL_ALLOWLIST = String(process.env.SCRIPT_URL_ALLOWLIST || "")
   .split(",")
@@ -39,6 +41,10 @@ if (GHOST_T_ADMIN_TOKEN === "dev-ghost-t-admin-token") {
   console.warn("GHOST_T_ADMIN_TOKEN is not set. Using development token: dev-ghost-t-admin-token");
 }
 
+if (DP_ADMIN_TOKEN === "dev-dp-admin-token") {
+  console.warn("DP_ADMIN_TOKEN is not set. Using development token: dev-dp-admin-token");
+}
+
 if (DEVICE_HASH_SECRET === "dev-device-secret") {
   console.warn("DEVICE_HASH_SECRET is not set. Set it before production use.");
 }
@@ -46,6 +52,7 @@ if (DEVICE_HASH_SECRET === "dev-device-secret") {
 const ADMIN_PRODUCTS = [
   { token: ADMIN_TOKEN, product: "default", name: "GhostLua Key System", defaultScriptUrl: DEFAULT_SCRIPT_URL },
   { token: GHOST_T_ADMIN_TOKEN, product: "ghost_t", name: "Ghost T Key System", defaultScriptUrl: GHOST_T_SCRIPT_URL || DEFAULT_SCRIPT_URL },
+  { token: DP_ADMIN_TOKEN, product: "dp", name: "DP Key System", defaultScriptUrl: DP_SCRIPT_URL || DEFAULT_SCRIPT_URL },
 ];
 
 function assertProductionConfig() {
@@ -54,6 +61,7 @@ function assertProductionConfig() {
   const failures = [];
   if (ADMIN_TOKEN === "dev-admin-token") failures.push("ADMIN_TOKEN");
   if (GHOST_T_ADMIN_TOKEN === "dev-ghost-t-admin-token") failures.push("GHOST_T_ADMIN_TOKEN");
+  if (DP_ADMIN_TOKEN === "dev-dp-admin-token") failures.push("DP_ADMIN_TOKEN");
   if (DEVICE_HASH_SECRET === "dev-device-secret") failures.push("DEVICE_HASH_SECRET");
   if (!process.env.PUBLIC_BASE_URL && !process.env.VERCEL_PROJECT_PRODUCTION_URL) failures.push("PUBLIC_BASE_URL");
 
@@ -602,9 +610,6 @@ async function validateKeyForDevice({ keyCode, deviceId, userId, ip, product }) 
     ? await get("SELECT * FROM license_keys WHERE key_code = ? AND product = ?", [keyCode, normalizedProduct])
     : await get("SELECT * FROM license_keys WHERE key_code = ?", [keyCode]);
 
-  if (!keyRow && normalizedProduct) {
-    keyRow = await get("SELECT * FROM license_keys WHERE key_code = ?", [keyCode]);
-  }
   if (!keyRow) {
     await logUsage({ keyCode, deviceHash, userId, ip, action: "INVALID_KEY" });
     return { ok: false, status: 404, message: "Invalid key", code: "invalid" };
@@ -1184,6 +1189,11 @@ app.post("/api/discord/ghost-t/get-key", setDiscordProduct("ghost_t"), requireDi
 app.post("/api/discord/ghost-t/redeem-key", setDiscordProduct("ghost_t"), requireDiscordBot, discordRedeemKey);
 app.post("/api/discord/ghost-t/reset-hwid", setDiscordProduct("ghost_t"), requireDiscordBot, discordResetHwid);
 app.post("/api/discord/ghost-t/get-script", setDiscordProduct("ghost_t"), requireDiscordBot, discordGetScript);
+
+app.post("/api/discord/dp/get-key", setDiscordProduct("dp"), requireDiscordBot, discordGetKey);
+app.post("/api/discord/dp/redeem-key", setDiscordProduct("dp"), requireDiscordBot, discordRedeemKey);
+app.post("/api/discord/dp/reset-hwid", setDiscordProduct("dp"), requireDiscordBot, discordResetHwid);
+app.post("/api/discord/dp/get-script", setDiscordProduct("dp"), requireDiscordBot, discordGetScript);
 
 app.post(["/api/blacklist-hwid", "/api/blacklist-device"], requireAdmin, asyncHandler(async (req, res) => {
   const deviceId = normalizeDeviceId(req);

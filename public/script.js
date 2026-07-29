@@ -195,7 +195,11 @@ function renderStats() {
 
 function renderProduct() {
   $("dashboard-title").textContent = productName;
-  $("dashboard-product").textContent = productName === "Ghost T Key System" ? "Ghost T Dashboard" : "Dashboard";
+  const dashboardLabels = {
+    ghost_t: "Ghost T Dashboard",
+    dp: "DP Dashboard",
+  };
+  $("dashboard-product").textContent = dashboardLabels[product] || "Dashboard";
 }
 
 function renderKeys() {
@@ -299,7 +303,7 @@ function escapeHtml(value) {
 
 function renderIntegrationSnippets() {
   const loaderUrl = `${window.location.origin}/api/loader`;
-  const productPrefix = product === "ghost_t" ? 'script_product="ghost_t"; ' : "";
+  const productPrefix = product === "default" ? "" : `script_product="${product}"; `;
 
   $("curl-snippet").textContent = `${productPrefix}script_key="KEY-ABCD-EFGH-JKLM-NPQR"; loadstring(game:HttpGet("${loaderUrl}", true))()`;
 
@@ -313,7 +317,7 @@ function renderIntegrationSnippets() {
 }
 
 function buildLoadstring(key) {
-  const productPrefix = product === "ghost_t" ? 'script_product="ghost_t"; ' : "";
+  const productPrefix = product === "default" ? "" : `script_product="${product}"; `;
   return `${productPrefix}script_key="${key}"; loadstring(game:HttpGet("${window.location.origin}/api/loader", true))()`;
 }
 

@@ -36,12 +36,14 @@ Vercel serverless functions do not keep a local SQLite database between deployme
 ```text
 ADMIN_TOKEN=replace-with-a-long-random-admin-token
 GHOST_T_ADMIN_TOKEN=replace-with-a-long-random-ghost-t-admin-token
+DP_ADMIN_TOKEN=replace-with-a-long-random-dp-admin-token
 DISCORD_BOT_API_TOKEN=
 DEVICE_HASH_SECRET=replace-with-a-long-random-device-secret
 CORS_ORIGIN=https://your-project.vercel.app
 PUBLIC_BASE_URL=https://your-project.vercel.app
 DEFAULT_SCRIPT_URL=https://your-domain.example/main.lua
 GHOST_T_SCRIPT_URL=https://your-domain.example/ghost-t.lua
+DP_SCRIPT_URL=https://your-domain.example/dp.lua
 SCRIPT_URL_ALLOWLIST=your-domain.example
 ALLOW_INSECURE_SCRIPT_URLS=false
 MAX_SCRIPT_BYTES=5242880
@@ -62,12 +64,14 @@ npm install
 npx vercel
 npx vercel env add ADMIN_TOKEN production
 npx vercel env add GHOST_T_ADMIN_TOKEN production
+npx vercel env add DP_ADMIN_TOKEN production
 npx vercel env add DISCORD_BOT_API_TOKEN production
 npx vercel env add DEVICE_HASH_SECRET production
 npx vercel env add CORS_ORIGIN production
 npx vercel env add PUBLIC_BASE_URL production
 npx vercel env add DEFAULT_SCRIPT_URL production
 npx vercel env add GHOST_T_SCRIPT_URL production
+npx vercel env add DP_SCRIPT_URL production
 npx vercel env add SCRIPT_URL_ALLOWLIST production
 npx vercel env add AUTO_DELETE_EXPIRED_KEYS production
 npx vercel env add DATABASE_URL production
@@ -78,7 +82,7 @@ npx vercel --prod
 ## API
 
 Admin endpoints accept the token in either the `X-Admin-Token` header or the legacy `adminToken` JSON body field.
-Logging in with `GHOST_T_ADMIN_TOKEN` opens a separate Ghost T dashboard. Ghost T keys are stored with `product: "ghost_t"` and are hidden from the default `ADMIN_TOKEN` dashboard.
+Logging in with `GHOST_T_ADMIN_TOKEN` opens a separate Ghost T dashboard. Logging in with `DP_ADMIN_TOKEN` opens a separate DP dashboard. Ghost T keys are stored with `product: "ghost_t"` and DP keys are stored with `product: "dp"`; each dashboard only shows its own keys.
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -153,8 +157,9 @@ Use separate Discord API paths for each dashboard:
 | --- | --- | --- | --- |
 | GhostLua | `default` | `DISCORD_BOT_API_TOKEN` or `ADMIN_TOKEN` | `/api/discord/ghostlua/get-key`, `/api/discord/ghostlua/redeem-key`, `/api/discord/ghostlua/reset-hwid`, `/api/discord/ghostlua/get-script` |
 | Ghost T | `ghost_t` | `DISCORD_BOT_API_TOKEN` or `GHOST_T_ADMIN_TOKEN` | `/api/discord/ghost-t/get-key`, `/api/discord/ghost-t/redeem-key`, `/api/discord/ghost-t/reset-hwid`, `/api/discord/ghost-t/get-script` |
+| DP | `dp` | `DISCORD_BOT_API_TOKEN` or `DP_ADMIN_TOKEN` | `/api/discord/dp/get-key`, `/api/discord/dp/redeem-key`, `/api/discord/dp/reset-hwid`, `/api/discord/dp/get-script` |
 
-The generic `/api/discord/get-key`, `/api/discord/redeem-key`, `/api/discord/reset-hwid`, and `/api/discord/get-script` endpoints still work when you pass `"product": "ghost_t"` or `"product": "default"`, but bots should prefer the dashboard-specific paths above.
+The generic `/api/discord/get-key`, `/api/discord/redeem-key`, `/api/discord/reset-hwid`, and `/api/discord/get-script` endpoints still work when you pass `"product": "ghost_t"`, `"product": "dp"`, or `"product": "default"`, but bots should prefer the dashboard-specific paths above.
 
 `POST /api/discord/get-key` creates a key based on the user's role. Send one role/plan or a full role list from Discord. If multiple supported roles are present, the server picks the best one in this order: `lifetime`, `3months`, `month`, `week`.
 
@@ -220,7 +225,7 @@ The Discord bot flow should be:
 
 ## Security Notes
 
-- Production refuses to start with the development `ADMIN_TOKEN`, `GHOST_T_ADMIN_TOKEN`, or `DEVICE_HASH_SECRET`. `DISCORD_BOT_API_TOKEN` is optional because the product-specific Discord routes can use their matching dashboard token.
+- Production refuses to start with the development `ADMIN_TOKEN`, `GHOST_T_ADMIN_TOKEN`, `DP_ADMIN_TOKEN`, or `DEVICE_HASH_SECRET`. `DISCORD_BOT_API_TOKEN` is optional because the product-specific Discord routes can use their matching dashboard token.
 - Generated keys use 25 random characters split across five groups.
 - Protected script URLs must use HTTPS unless they are localhost or `ALLOW_INSECURE_SCRIPT_URLS=true`.
 - Set `SCRIPT_URL_ALLOWLIST` to a comma-separated list of allowed script hostnames so new keys cannot point at arbitrary domains.
