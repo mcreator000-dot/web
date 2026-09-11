@@ -149,17 +149,17 @@ Use scripts and script URLs you control. Keep admin tokens in environment variab
 
 ## Discord Bot API
 
-Discord bot endpoints require either `X-Discord-Bot-Token: <DISCORD_BOT_API_TOKEN>` or `Authorization: Bearer <DISCORD_BOT_API_TOKEN>`. The product-specific routes also accept their matching dashboard token in `X-Admin-Token`.
+Discord bot endpoints require either `X-Discord-Bot-Token: <DISCORD_BOT_API_TOKEN>` or `Authorization: Bearer <DISCORD_BOT_API_TOKEN>`. Use a separate Discord bot token instead of a dashboard admin token so the bot host does not have full dashboard access.
 
 Use separate Discord API paths for each dashboard:
 
 | Dashboard | Product | Auth token accepted | Endpoints |
 | --- | --- | --- | --- |
-| GhostLua | `default` | `DISCORD_BOT_API_TOKEN` or `ADMIN_TOKEN` | `/api/discord/ghostlua/get-key`, `/api/discord/ghostlua/redeem-key`, `/api/discord/ghostlua/reset-hwid`, `/api/discord/ghostlua/get-script` |
-| Ghost T | `ghost_t` | `DISCORD_BOT_API_TOKEN` or `GHOST_T_ADMIN_TOKEN` | `/api/discord/ghost-t/get-key`, `/api/discord/ghost-t/redeem-key`, `/api/discord/ghost-t/reset-hwid`, `/api/discord/ghost-t/get-script` |
-| DP | `dp` | `DISCORD_BOT_API_TOKEN` or `DP_ADMIN_TOKEN` | `/api/discord/dp/get-key`, `/api/discord/dp/redeem-key`, `/api/discord/dp/reset-hwid`, `/api/discord/dp/get-script` |
+| GhostLua | `default` | `DISCORD_BOT_API_TOKEN` | `/api/discord/ghostlua/get-key`, `/api/discord/ghostlua/redeem-key`, `/api/discord/ghostlua/reset-hwid`, `/api/discord/ghostlua/get-script`, `/api/discord/ghostlua/lookup-key`, `/api/discord/ghostlua/list-keys`, `/api/discord/ghostlua/toggle-key`, `/api/discord/ghostlua/delete-key` |
+| Ghost T | `ghost_t` | `DISCORD_BOT_API_TOKEN` | `/api/discord/ghost-t/get-key`, `/api/discord/ghost-t/redeem-key`, `/api/discord/ghost-t/reset-hwid`, `/api/discord/ghost-t/get-script`, `/api/discord/ghost-t/lookup-key`, `/api/discord/ghost-t/list-keys`, `/api/discord/ghost-t/toggle-key`, `/api/discord/ghost-t/delete-key` |
+| DP | `dp` | `DISCORD_BOT_API_TOKEN` | `/api/discord/dp/get-key`, `/api/discord/dp/redeem-key`, `/api/discord/dp/reset-hwid`, `/api/discord/dp/get-script`, `/api/discord/dp/lookup-key`, `/api/discord/dp/list-keys`, `/api/discord/dp/toggle-key`, `/api/discord/dp/delete-key` |
 
-The generic `/api/discord/get-key`, `/api/discord/redeem-key`, `/api/discord/reset-hwid`, and `/api/discord/get-script` endpoints still work when you pass `"product": "ghost_t"`, `"product": "dp"`, or `"product": "default"`, but bots should prefer the dashboard-specific paths above.
+The generic `/api/discord/get-key`, `/api/discord/redeem-key`, `/api/discord/reset-hwid`, `/api/discord/get-script`, `/api/discord/lookup-key`, `/api/discord/list-keys`, `/api/discord/toggle-key`, and `/api/discord/delete-key` endpoints still work when you pass `"product": "ghost_t"`, `"product": "dp"`, or `"product": "default"`, but bots should prefer the dashboard-specific paths above.
 
 `POST /api/discord/get-key` creates a key based on the user's role. Send one role/plan or a full role list from Discord. If multiple supported roles are present, the server picks the best one in this order: `lifetime`, `3months`, `month`, `week`.
 
@@ -223,9 +223,49 @@ The Discord bot flow should be:
 }
 ```
 
+`POST /api/discord/list-keys` returns recent keys for the selected product:
+
+```json
+{
+  "limit": 10,
+  "product": "dp"
+}
+```
+
+`POST /api/discord/lookup-key` returns one key and its device bindings:
+
+```json
+{
+  "key": "KEY-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX",
+  "product": "dp"
+}
+```
+
+`POST /api/discord/toggle-key` enables or disables a key:
+
+```json
+{
+  "key": "KEY-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX",
+  "isActive": false,
+  "discordUserId": "admin-discord-id",
+  "product": "dp"
+}
+```
+
+`POST /api/discord/delete-key` permanently deletes a key and requires confirmation:
+
+```json
+{
+  "key": "KEY-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX",
+  "confirm": true,
+  "discordUserId": "admin-discord-id",
+  "product": "dp"
+}
+```
+
 ## Security Notes
 
-- Production refuses to start with the development `ADMIN_TOKEN`, `GHOST_T_ADMIN_TOKEN`, `DP_ADMIN_TOKEN`, or `DEVICE_HASH_SECRET`. `DISCORD_BOT_API_TOKEN` is optional because the product-specific Discord routes can use their matching dashboard token.
+- Production refuses to start with the development `ADMIN_TOKEN`, `GHOST_T_ADMIN_TOKEN`, `DP_ADMIN_TOKEN`, missing `DISCORD_BOT_API_TOKEN`, or `DEVICE_HASH_SECRET`.
 - Generated keys use 25 random characters split across five groups.
 - Protected script URLs must use HTTPS unless they are localhost or `ALLOW_INSECURE_SCRIPT_URLS=true`.
 - Set `SCRIPT_URL_ALLOWLIST` to a comma-separated list of allowed script hostnames so new keys cannot point at arbitrary domains.
