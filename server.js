@@ -53,13 +53,13 @@ if (DEVICE_HASH_SECRET === "dev-device-secret") {
   console.warn("DEVICE_HASH_SECRET is not set. Set it before production use.");
 }
 
-const ADMIN_PRODUCTS = [
+const PRODUCTS = [
   { token: ADMIN_TOKEN, product: "default", name: "GhostLua Key System", defaultScriptUrl: DEFAULT_SCRIPT_URL },
   { token: GHOST_T_ADMIN_TOKEN, product: "ghost_t", name: "Ghost T Key System", defaultScriptUrl: GHOST_T_SCRIPT_URL || DEFAULT_SCRIPT_URL },
-  ...(DP_ADMIN_TOKEN
-    ? [{ token: DP_ADMIN_TOKEN, product: "dp", name: "DP Key System", defaultScriptUrl: DP_SCRIPT_URL || DEFAULT_SCRIPT_URL }]
-    : []),
+  { token: DP_ADMIN_TOKEN, product: "dp", name: "DP Key System", defaultScriptUrl: DP_SCRIPT_URL || DEFAULT_SCRIPT_URL },
 ];
+
+const ADMIN_PRODUCTS = PRODUCTS.filter((entry) => entry.token);
 
 function assertProductionConfig() {
   if (process.env.NODE_ENV !== "production") return;
@@ -337,7 +337,7 @@ function normalizeKey(value) {
 
 function normalizeProduct(value) {
   const product = String(value || "").trim();
-  return ADMIN_PRODUCTS.some((entry) => entry.product === product) ? product : null;
+  return PRODUCTS.some((entry) => entry.product === product) ? product : null;
 }
 
 function normalizeAdminActor(req) {
@@ -405,7 +405,7 @@ function getAdminProduct(product, defaultProduct = "ghost_t") {
   const requestedProduct = String(product || "").trim();
   const normalizedProduct = normalizeProduct(requestedProduct) || (requestedProduct ? null : defaultProduct);
   if (!normalizedProduct) return null;
-  return ADMIN_PRODUCTS.find((entry) => entry.product === normalizedProduct) || ADMIN_PRODUCTS[0];
+  return PRODUCTS.find((entry) => entry.product === normalizedProduct) || PRODUCTS[0];
 }
 
 function normalizeDiscordRole(value) {
