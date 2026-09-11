@@ -1391,6 +1391,22 @@ app.post("/api/discord/dp/list-keys", setDiscordProduct("dp"), requireDiscordBot
 app.post("/api/discord/dp/toggle-key", setDiscordProduct("dp"), requireDiscordBot, discordToggleKey);
 app.post("/api/discord/dp/delete-key", setDiscordProduct("dp"), requireDiscordBot, discordDeleteKey);
 
+function registerFlatDiscordRoutes(slug, product) {
+  const setProduct = setDiscordProduct(product);
+  app.post(`/api/discord-${slug}-get-key`, setProduct, requireDiscordBot, discordGetKey);
+  app.post(`/api/discord-${slug}-redeem-key`, setProduct, requireDiscordBot, discordRedeemKey);
+  app.post(`/api/discord-${slug}-reset-hwid`, setProduct, requireDiscordBot, discordResetHwid);
+  app.post(`/api/discord-${slug}-get-script`, setProduct, requireDiscordBot, discordGetScript);
+  app.post(`/api/discord-${slug}-lookup-key`, setProduct, requireDiscordBot, discordLookupKey);
+  app.post(`/api/discord-${slug}-list-keys`, setProduct, requireDiscordBot, discordListKeys);
+  app.post(`/api/discord-${slug}-toggle-key`, setProduct, requireDiscordBot, discordToggleKey);
+  app.post(`/api/discord-${slug}-delete-key`, setProduct, requireDiscordBot, discordDeleteKey);
+}
+
+registerFlatDiscordRoutes("ghostlua", "default");
+registerFlatDiscordRoutes("ghost-t", "ghost_t");
+registerFlatDiscordRoutes("dp", "dp");
+
 app.post(["/api/blacklist-hwid", "/api/blacklist-device"], requireAdmin, asyncHandler(async (req, res) => {
   const deviceId = normalizeDeviceId(req);
   const reason = String(req.body.reason || "No reason provided").slice(0, 500);
