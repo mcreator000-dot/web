@@ -45,6 +45,10 @@ if (!DP_ADMIN_TOKEN) {
   console.warn("DP_ADMIN_TOKEN is not set. DP dashboard routes are disabled until it is configured.");
 }
 
+if (!DISCORD_BOT_API_TOKEN) {
+  console.warn("DISCORD_BOT_API_TOKEN is not set. Discord bot routes are disabled until it is configured.");
+}
+
 if (DEVICE_HASH_SECRET === "dev-device-secret") {
   console.warn("DEVICE_HASH_SECRET is not set. Set it before production use.");
 }
@@ -63,6 +67,7 @@ function assertProductionConfig() {
   const failures = [];
   if (ADMIN_TOKEN === "dev-admin-token") failures.push("ADMIN_TOKEN");
   if (GHOST_T_ADMIN_TOKEN === "dev-ghost-t-admin-token") failures.push("GHOST_T_ADMIN_TOKEN");
+  if (!DISCORD_BOT_API_TOKEN) failures.push("DISCORD_BOT_API_TOKEN");
   if (DEVICE_HASH_SECRET === "dev-device-secret") failures.push("DEVICE_HASH_SECRET");
   if (!process.env.PUBLIC_BASE_URL && !process.env.VERCEL_PROJECT_PRODUCTION_URL) failures.push("PUBLIC_BASE_URL");
 
@@ -309,13 +314,10 @@ function requireAdmin(req, res, next) {
 function requireDiscordBot(req, res, next) {
   const auth = String(req.get("authorization") || "");
   const bearerToken = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
-  const suppliedToken = req.get("x-discord-bot-token") || req.get("x-admin-token") || req.body.discordBotToken || bearerToken;
-  const routeProduct = normalizeProduct(req.discordProduct || req.body.product);
-  const productAdmin = routeProduct ? ADMIN_PRODUCTS.find((entry) => entry.product === routeProduct) : null;
+  const suppliedToken = req.get("x-discord-bot-token") || bearerToken;
   const isDiscordToken = DISCORD_BOT_API_TOKEN ? timingSafeEqual(suppliedToken, DISCORD_BOT_API_TOKEN) : false;
-  const isProductAdminToken = productAdmin ? timingSafeEqual(suppliedToken, productAdmin.token) : false;
 
-  if (!isDiscordToken && !isProductAdminToken) {
+  if (!isDiscordToken) {
     return jsonError(res, 403, "Unauthorized", "unauthorized");
   }
 
@@ -1197,25 +1199,197 @@ const discordGetScript = asyncHandler(async (req, res) => {
   });
 });
 
+async function getFormattedKeyForProduct(keyCode, product) {
+  const keyRow = await get(
+    `SELECT lk.*,
+            SUM(CASE WHEN kd.active = 1 THEN 1 ELSE 0 END) AS used_count,
+            ${executionIpsSelectSql()},
+            ${blacklistedDevicesSelectSql()}
+     FROM license_keys lk
+     LEFT JOIN key_devices kd ON kd.key_id = lk.id
+     LEFT JOIN device_blacklist dbl ON dbl.device_hash = kd.device_hash
+     WHERE lk.key_code = ? AND lk.product = ?
+     GROUP BY lk.id`,
+    [keyCode, product]
+  );
+
+  if (!keyRow) {
+    return { keyRow: null, devices: [] };
+  }
+
+  const devices = await all(
+    `SELECT user_id, activated_at, last_validated_at, activation_ip, last_ip, validation_count, active
+     FROM key_devices
+     WHERE key_id = ?
+     ORDER BY last_validated_at DESC`,
+    [keyRow.id]
+  );
+
+  return { keyRow, devices };
+}
+
+async function getFormattedKeysForProduct(product, limit) {
+  return all(`
+    SELECT lk.*,
+           SUM(CASE WHEN kd.active = 1 THEN 1 ELSE 0 END) AS used_count,
+           ${executionIpsSelectSql()},
+           ${blacklistedDevicesSelectSql()}
+    FROM license_keys lk
+    LEFT JOIN key_devices kd ON kd.key_id = lk.id
+    LEFT JOIN device_blacklist dbl ON dbl.device_hash = kd.device_hash
+    WHERE lk.product = ?
+    GROUP BY lk.id
+    ORDER BY lk.created_at DESC
+    LIMIT ?
+  `, [product, limit]);
+}
+
+const discordLookupKey = asyncHandler(async (req, res) => {
+  const keyCode = normalizeKey(req.body.key);
+  const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
+
+  if (!adminProduct) {
+    return jsonError(res, 400, "Invalid product", "invalid_product");
+  }
+
+  if (!keyCode) {
+    return jsonError(res, 400, "Missing key", "missing_key");
+  }
+
+  const { keyRow, devices } = await getFormattedKeyForProduct(keyCode, adminProduct.product);
+  if (!keyRow) {
+    return jsonError(res, 404, "Key not found", "not_found");
+  }
+
+  return res.json({
+    success: true,
+    product: adminProduct.product,
+    productName: adminProduct.name,
+    data: formatKeyRow(keyRow),
+    devices,
+  });
+});
+
+const discordListKeys = asyncHandler(async (req, res) => {
+  const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
+  const limit = Math.min(25, Math.max(1, Number(req.body.limit || 10)));
+
+  if (!adminProduct) {
+    return jsonError(res, 400, "Invalid product", "invalid_product");
+  }
+
+  const rows = await getFormattedKeysForProduct(adminProduct.product, limit);
+
+  return res.json({
+    success: true,
+    product: adminProduct.product,
+    productName: adminProduct.name,
+    data: rows.map(formatKeyRow),
+  });
+});
+
+const discordToggleKey = asyncHandler(async (req, res) => {
+  const keyCode = normalizeKey(req.body.key);
+  const isActive = req.body.isActive ? 1 : 0;
+  const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
+  const adminActor = normalizeDiscordActor(req);
+
+  if (!adminProduct) {
+    return jsonError(res, 400, "Invalid product", "invalid_product");
+  }
+
+  if (!keyCode) {
+    return jsonError(res, 400, "Missing key", "missing_key");
+  }
+
+  const result = await run(
+    "UPDATE license_keys SET is_active = ? WHERE key_code = ? AND product = ?",
+    [isActive, keyCode, adminProduct.product]
+  );
+  if (!result.changes) {
+    return jsonError(res, 404, "Key not found", "not_found");
+  }
+
+  await logUsage({
+    keyCode,
+    ip: req.ip,
+    action: isActive ? "DISCORD_KEY_ENABLED" : "DISCORD_KEY_DISABLED",
+    details: JSON.stringify({ adminActor, product: adminProduct.product }),
+  });
+
+  return res.json({ success: true, message: isActive ? "Key enabled" : "Key disabled" });
+});
+
+const discordDeleteKey = asyncHandler(async (req, res) => {
+  const keyCode = normalizeKey(req.body.key);
+  const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
+  const adminActor = normalizeDiscordActor(req);
+
+  if (!adminProduct) {
+    return jsonError(res, 400, "Invalid product", "invalid_product");
+  }
+
+  if (!keyCode) {
+    return jsonError(res, 400, "Missing key", "missing_key");
+  }
+
+  if (req.body.confirm !== true) {
+    return jsonError(res, 400, "Delete requires confirm: true", "missing_confirmation");
+  }
+
+  const result = await run(
+    "DELETE FROM license_keys WHERE key_code = ? AND product = ?",
+    [keyCode, adminProduct.product]
+  );
+  if (!result.changes) {
+    return jsonError(res, 404, "Key not found", "not_found");
+  }
+
+  await logUsage({
+    keyCode,
+    ip: req.ip,
+    action: "DISCORD_KEY_DELETED",
+    details: JSON.stringify({ adminActor, product: adminProduct.product }),
+  });
+
+  return res.json({ success: true, message: "Key deleted" });
+});
+
 app.post("/api/discord/get-key", requireDiscordBot, discordGetKey);
 app.post("/api/discord/redeem-key", requireDiscordBot, discordRedeemKey);
 app.post("/api/discord/reset-hwid", requireDiscordBot, discordResetHwid);
 app.post("/api/discord/get-script", requireDiscordBot, discordGetScript);
+app.post("/api/discord/lookup-key", requireDiscordBot, discordLookupKey);
+app.post("/api/discord/list-keys", requireDiscordBot, discordListKeys);
+app.post("/api/discord/toggle-key", requireDiscordBot, discordToggleKey);
+app.post("/api/discord/delete-key", requireDiscordBot, discordDeleteKey);
 
 app.post("/api/discord/ghostlua/get-key", setDiscordProduct("default"), requireDiscordBot, discordGetKey);
 app.post("/api/discord/ghostlua/redeem-key", setDiscordProduct("default"), requireDiscordBot, discordRedeemKey);
 app.post("/api/discord/ghostlua/reset-hwid", setDiscordProduct("default"), requireDiscordBot, discordResetHwid);
 app.post("/api/discord/ghostlua/get-script", setDiscordProduct("default"), requireDiscordBot, discordGetScript);
+app.post("/api/discord/ghostlua/lookup-key", setDiscordProduct("default"), requireDiscordBot, discordLookupKey);
+app.post("/api/discord/ghostlua/list-keys", setDiscordProduct("default"), requireDiscordBot, discordListKeys);
+app.post("/api/discord/ghostlua/toggle-key", setDiscordProduct("default"), requireDiscordBot, discordToggleKey);
+app.post("/api/discord/ghostlua/delete-key", setDiscordProduct("default"), requireDiscordBot, discordDeleteKey);
 
 app.post("/api/discord/ghost-t/get-key", setDiscordProduct("ghost_t"), requireDiscordBot, discordGetKey);
 app.post("/api/discord/ghost-t/redeem-key", setDiscordProduct("ghost_t"), requireDiscordBot, discordRedeemKey);
 app.post("/api/discord/ghost-t/reset-hwid", setDiscordProduct("ghost_t"), requireDiscordBot, discordResetHwid);
 app.post("/api/discord/ghost-t/get-script", setDiscordProduct("ghost_t"), requireDiscordBot, discordGetScript);
+app.post("/api/discord/ghost-t/lookup-key", setDiscordProduct("ghost_t"), requireDiscordBot, discordLookupKey);
+app.post("/api/discord/ghost-t/list-keys", setDiscordProduct("ghost_t"), requireDiscordBot, discordListKeys);
+app.post("/api/discord/ghost-t/toggle-key", setDiscordProduct("ghost_t"), requireDiscordBot, discordToggleKey);
+app.post("/api/discord/ghost-t/delete-key", setDiscordProduct("ghost_t"), requireDiscordBot, discordDeleteKey);
 
 app.post("/api/discord/dp/get-key", setDiscordProduct("dp"), requireDiscordBot, discordGetKey);
 app.post("/api/discord/dp/redeem-key", setDiscordProduct("dp"), requireDiscordBot, discordRedeemKey);
 app.post("/api/discord/dp/reset-hwid", setDiscordProduct("dp"), requireDiscordBot, discordResetHwid);
 app.post("/api/discord/dp/get-script", setDiscordProduct("dp"), requireDiscordBot, discordGetScript);
+app.post("/api/discord/dp/lookup-key", setDiscordProduct("dp"), requireDiscordBot, discordLookupKey);
+app.post("/api/discord/dp/list-keys", setDiscordProduct("dp"), requireDiscordBot, discordListKeys);
+app.post("/api/discord/dp/toggle-key", setDiscordProduct("dp"), requireDiscordBot, discordToggleKey);
+app.post("/api/discord/dp/delete-key", setDiscordProduct("dp"), requireDiscordBot, discordDeleteKey);
 
 app.post(["/api/blacklist-hwid", "/api/blacklist-device"], requireAdmin, asyncHandler(async (req, res) => {
   const deviceId = normalizeDeviceId(req);
