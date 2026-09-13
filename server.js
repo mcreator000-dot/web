@@ -58,6 +58,7 @@ const PRODUCTS = [
   { token: GHOST_T_ADMIN_TOKEN, product: "ghost_t", name: "Ghost T Key System", defaultScriptUrl: GHOST_T_SCRIPT_URL || DEFAULT_SCRIPT_URL },
   { token: DP_ADMIN_TOKEN, product: "dp", name: "DP Key System", defaultScriptUrl: DP_SCRIPT_URL || DEFAULT_SCRIPT_URL },
 ];
+const GLOBAL_SCRIPT_PRODUCT = "global";
 
 const ADMIN_PRODUCTS = PRODUCTS.filter((entry) => entry.token);
 
@@ -1752,15 +1753,23 @@ const discordListScriptUrls = asyncHandler(async (req, res) => {
   }
 
   const rows = await all(
-    "SELECT name, url, created_at FROM script_urls WHERE product = ? ORDER BY name ASC",
-    [adminProduct.product]
+    "SELECT product, name, url, created_at FROM script_urls WHERE product = ? OR product = ? ORDER BY name ASC, product ASC",
+    [GLOBAL_SCRIPT_PRODUCT, adminProduct.product]
   );
+  const scriptsByName = new Map();
+
+  for (const row of rows) {
+    const key = row.name.toLowerCase();
+    if (!scriptsByName.has(key) || row.product === GLOBAL_SCRIPT_PRODUCT) {
+      scriptsByName.set(key, row);
+    }
+  }
 
   return res.json({
     success: true,
-    product: adminProduct.product,
+    product: GLOBAL_SCRIPT_PRODUCT,
     productName: adminProduct.name,
-    data: rows.map((row) => ({
+    data: Array.from(scriptsByName.values()).map((row) => ({
       name: row.name,
       url: row.url,
       createdAt: row.created_at,
@@ -1789,13 +1798,13 @@ const discordAddScriptUrl = asyncHandler(async (req, res) => {
     `INSERT INTO script_urls (product, name, url)
      VALUES (?, ?, ?)
      ON CONFLICT(product, name) DO UPDATE SET url = excluded.url`,
-    [adminProduct.product, name, url]
+    [GLOBAL_SCRIPT_PRODUCT, name, url]
   );
 
   await logUsage({
     ip: req.ip,
     action: "DISCORD_SCRIPT_URL_SAVED",
-    details: JSON.stringify({ product: adminProduct.product, name, url }),
+    details: JSON.stringify({ product: GLOBAL_SCRIPT_PRODUCT, name, url }),
   });
 
   return res.json({
@@ -1818,8 +1827,8 @@ const discordRemoveScriptUrl = asyncHandler(async (req, res) => {
   }
 
   const result = await run(
-    "DELETE FROM script_urls WHERE product = ? AND name = ?",
-    [adminProduct.product, name]
+    "DELETE FROM script_urls WHERE (product = ? OR product = ?) AND name = ?",
+    [GLOBAL_SCRIPT_PRODUCT, adminProduct.product, name]
   );
 
   if (!result.changes) {
@@ -1829,7 +1838,7 @@ const discordRemoveScriptUrl = asyncHandler(async (req, res) => {
   await logUsage({
     ip: req.ip,
     action: "DISCORD_SCRIPT_URL_REMOVED",
-    details: JSON.stringify({ product: adminProduct.product, name }),
+    details: JSON.stringify({ product: GLOBAL_SCRIPT_PRODUCT, name }),
   });
 
   return res.json({
