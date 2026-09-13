@@ -423,10 +423,9 @@ function normalizeScriptUrl(value) {
   return parsed.toString();
 }
 
-function buildLoadstring(baseUrl, keyCode, product) {
+function buildLoadstring(baseUrl, keyCode) {
   const loaderUrl = `${baseUrl.replace(/\/+$/, "")}/api/loader`;
-  const productPrefix = product ? `script_product="${product}"; ` : "";
-  return `${productPrefix}script_key="${keyCode}"; loadstring(game:HttpGet("${loaderUrl}", true))()`;
+  return `script_key="${keyCode}"; loadstring(game:HttpGet("${loaderUrl}", true))()`;
 }
 
 function getAdminProduct(product, defaultProduct = "ghost_t") {
@@ -967,7 +966,7 @@ app.post("/api/generate-key", requireAdmin, asyncHandler(async (req, res) => {
       expiresAfterHours,
       maxUses: maxDevices,
       scriptUrl,
-      loadstring: buildLoadstring(getPublicBaseUrl(req), keyCode, req.adminProduct),
+      loadstring: buildLoadstring(getPublicBaseUrl(req), keyCode),
     });
   }
 
@@ -1107,7 +1106,7 @@ const discordGetKey = asyncHandler(async (req, res) => {
     expiresAfterHours,
     maxUses: maxDevices,
     scriptUrl,
-    loadstring: buildLoadstring(getPublicBaseUrl(req), keyCode, adminProduct.product),
+    loadstring: buildLoadstring(getPublicBaseUrl(req), keyCode),
     discordAccess: getDiscordAccessActions({ plan, expiresAt: null, isRedeemed: false }),
   });
 });
@@ -1222,7 +1221,7 @@ const discordGetScript = asyncHandler(async (req, res) => {
     product: keyRow.product || "default",
     scriptUrl: keyRow.script_url || "",
     loaderUrl: `${getPublicBaseUrl(req)}/api/loader`,
-    loadstring: buildLoadstring(getPublicBaseUrl(req), keyRow.key_code, keyRow.product || "default"),
+    loadstring: buildLoadstring(getPublicBaseUrl(req), keyRow.key_code),
     expiresAt: keyRow.expires_at,
     expiresAfterHours: keyRow.expires_after_hours,
     plan,
@@ -1462,7 +1461,7 @@ const discordTestKey = asyncHandler(async (req, res) => {
     expiresAfterHours: 1,
     maxUses: 1,
     scriptUrl,
-    loadstring: buildLoadstring(getPublicBaseUrl(req), keyCode, adminProduct.product),
+    loadstring: buildLoadstring(getPublicBaseUrl(req), keyCode),
     testUser: {
       discordUserId,
       discordTag,
