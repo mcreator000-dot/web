@@ -1326,7 +1326,7 @@ async function mapDiscordUserKey({ product, discordUserId, discordTag, keyCode }
      VALUES (?, ?, ?, ?)
      ON CONFLICT(product, discord_user_id) DO UPDATE SET
        discord_tag = excluded.discord_tag,
-       key_code = COALESCE(discord_user_keys.key_code, excluded.key_code)`,
+       key_code = excluded.key_code`,
     [product, discordUserId, discordTag || "", keyCode]
   );
 }
