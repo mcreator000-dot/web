@@ -245,6 +245,26 @@ async function initDatabase() {
       UNIQUE(product, discord_user_id)
     )
   `);
+  await run(`
+    CREATE TABLE IF NOT EXISTS discord_user_keys (
+      id ${USE_POSTGRES ? "SERIAL PRIMARY KEY" : "INTEGER PRIMARY KEY AUTOINCREMENT"},
+      product TEXT NOT NULL,
+      discord_user_id TEXT NOT NULL,
+      discord_tag TEXT NOT NULL DEFAULT '',
+      key_code TEXT,
+      created_at ${USE_POSTGRES ? "TIMESTAMPTZ" : "TEXT"} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(product, discord_user_id)
+    )
+  `);
+  await run(`
+    CREATE TABLE IF NOT EXISTS discord_user_hwid_resets (
+      id ${USE_POSTGRES ? "SERIAL PRIMARY KEY" : "INTEGER PRIMARY KEY AUTOINCREMENT"},
+      product TEXT NOT NULL,
+      discord_user_id TEXT NOT NULL,
+      last_reset_at TEXT NOT NULL,
+      UNIQUE(product, discord_user_id)
+    )
+  `);
 }
 
 async function deleteExpiredKeys() {
@@ -529,6 +549,16 @@ function getDiscordPlanDuration(plan) {
     lifetime: null,
   };
   return Object.prototype.hasOwnProperty.call(durations, plan) ? durations[plan] : undefined;
+}
+
+function formatCooldown(seconds) {
+  const safeSeconds = Math.max(1, Math.ceil(Number(seconds) || 1));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.ceil((safeSeconds % 3600) / 60);
+
+  if (hours > 0 && minutes > 0) return `${hours}h ${minutes}m`;
+  if (hours > 0) return `${hours}h`;
+  return `${minutes}m`;
 }
 
 async function createLicenseKey({ product, scriptUrl, expiresAfterHours, maxDevices, notes, ip, actor }) {
@@ -1095,6 +1125,15 @@ const discordGetKey = asyncHandler(async (req, res) => {
     return jsonError(res, 500, "Could not generate a unique key", "generation_failed");
   }
 
+  if (req.body.discordUserId || req.body.userId) {
+    await mapDiscordUserKey({
+      product: adminProduct.product,
+      discordUserId: String(req.body.discordUserId || req.body.userId).trim().slice(0, 128),
+      discordTag: String(req.body.discordTag || req.body.user || "").trim().slice(0, 128),
+      keyCode,
+    });
+  }
+
   return res.json({
     success: true,
     plan,
@@ -1277,6 +1316,61 @@ async function getFormattedKeysForProduct(product, limit) {
     ORDER BY lk.created_at DESC
     LIMIT ?
   `, [product, limit]);
+}
+
+async function mapDiscordUserKey({ product, discordUserId, discordTag, keyCode }) {
+  if (!discordUserId || !keyCode) return;
+
+  await run(
+    `INSERT INTO discord_user_keys (product, discord_user_id, discord_tag, key_code)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(product, discord_user_id) DO UPDATE SET
+       discord_tag = excluded.discord_tag,
+       key_code = COALESCE(discord_user_keys.key_code, excluded.key_code)`,
+    [product, discordUserId, discordTag || "", keyCode]
+  );
+}
+
+async function findDiscordUserKey({ product, discordUserId }) {
+  const mapped = await get(
+    `SELECT lk.*
+     FROM discord_user_keys duk
+     JOIN license_keys lk ON lk.key_code = duk.key_code AND lk.product = duk.product
+     WHERE duk.product = ? AND duk.discord_user_id = ?
+     LIMIT 1`,
+    [product, discordUserId]
+  );
+
+  if (mapped) return mapped;
+
+  const expirySql = USE_POSTGRES
+    ? "(lk.expires_at IS NULL OR lk.expires_at > NOW())"
+    : "(lk.expires_at IS NULL OR datetime(lk.expires_at) > datetime('now'))";
+  const fallback = await get(
+    `SELECT lk.*
+     FROM license_keys lk
+     JOIN usage_logs ul ON ul.key_code = lk.key_code
+     WHERE lk.product = ?
+       AND lk.is_active = 1
+       AND COALESCE(lk.notes, '') <> 'burn'
+       AND ${expirySql}
+       AND ul.action = 'KEY_GENERATED'
+       AND ul.details LIKE ?
+     ORDER BY lk.created_at DESC
+     LIMIT 1`,
+    [product, `%"adminActor":"${discordUserId}"%`]
+  );
+
+  if (fallback) {
+    await mapDiscordUserKey({
+      product,
+      discordUserId,
+      discordTag: "",
+      keyCode: fallback.key_code,
+    });
+  }
+
+  return fallback;
 }
 
 const discordLookupKey = asyncHandler(async (req, res) => {
@@ -1527,6 +1621,129 @@ const discordResetUser = asyncHandler(async (req, res) => {
   });
 });
 
+const discordUserScript = asyncHandler(async (req, res) => {
+  const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
+  const discordUserId = String(req.body.discordUserId || req.body.userId || "").trim().slice(0, 128);
+  const discordTag = String(req.body.discordTag || req.body.user || "").trim().slice(0, 128);
+
+  if (!adminProduct) {
+    return jsonError(res, 400, "Invalid product", "invalid_product");
+  }
+
+  if (!discordUserId) {
+    return jsonError(res, 400, "Missing Discord user", "missing_discord_user");
+  }
+
+  let keyRow = await findDiscordUserKey({
+    product: adminProduct.product,
+    discordUserId,
+  });
+  let created = false;
+
+  if (!keyRow) {
+    const scriptUrl = normalizeScriptUrl(req.body.scriptUrl || adminProduct.defaultScriptUrl);
+    if (!scriptUrl) {
+      return jsonError(res, 400, "Missing script URL", "missing_script_url");
+    }
+
+    const keyCode = await createLicenseKey({
+      product: adminProduct.product,
+      scriptUrl,
+      expiresAfterHours: null,
+      maxDevices: 1,
+      notes: discordTag || discordUserId,
+      ip: req.ip,
+      actor: discordUserId,
+    });
+
+    if (!keyCode) {
+      return jsonError(res, 500, "Could not generate a unique key", "generation_failed");
+    }
+
+    await mapDiscordUserKey({
+      product: adminProduct.product,
+      discordUserId,
+      discordTag,
+      keyCode,
+    });
+
+    keyRow = await get("SELECT * FROM license_keys WHERE key_code = ? AND product = ?", [keyCode, adminProduct.product]);
+    created = true;
+  }
+
+  return res.json({
+    success: true,
+    created,
+    product: adminProduct.product,
+    productName: adminProduct.name,
+    key: keyRow.key_code,
+    loadstring: buildLoadstring(getPublicBaseUrl(req), keyRow.key_code),
+  });
+});
+
+const discordUserResetHwid = asyncHandler(async (req, res) => {
+  const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
+  const discordUserId = String(req.body.discordUserId || req.body.userId || "").trim().slice(0, 128);
+  const cooldownMs = 24 * 60 * 60 * 1000;
+
+  if (!adminProduct) {
+    return jsonError(res, 400, "Invalid product", "invalid_product");
+  }
+
+  if (!discordUserId) {
+    return jsonError(res, 400, "Missing Discord user", "missing_discord_user");
+  }
+
+  const keyRow = await findDiscordUserKey({
+    product: adminProduct.product,
+    discordUserId,
+  });
+
+  if (!keyRow) {
+    return jsonError(res, 404, "No key found for this Discord user", "user_key_not_found");
+  }
+
+  const resetRow = await get(
+    "SELECT last_reset_at FROM discord_user_hwid_resets WHERE product = ? AND discord_user_id = ?",
+    [adminProduct.product, discordUserId]
+  );
+  const lastResetAt = resetRow ? new Date(resetRow.last_reset_at).getTime() : 0;
+  const remainingMs = cooldownMs - (Date.now() - lastResetAt);
+
+  if (Number.isFinite(lastResetAt) && lastResetAt > 0 && remainingMs > 0) {
+    const cooldownSeconds = Math.ceil(remainingMs / 1000);
+    return res.status(429).json({
+      success: false,
+      message: `Reset cooldown: ${formatCooldown(cooldownSeconds)} left`,
+      error: `Reset cooldown: ${formatCooldown(cooldownSeconds)} left`,
+      status: "reset_cooldown",
+      cooldownSeconds,
+    });
+  }
+
+  const result = await run("UPDATE key_devices SET active = 0 WHERE key_id = ?", [keyRow.id]);
+  const now = new Date().toISOString();
+  await run(
+    `INSERT INTO discord_user_hwid_resets (product, discord_user_id, last_reset_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(product, discord_user_id) DO UPDATE SET last_reset_at = excluded.last_reset_at`,
+    [adminProduct.product, discordUserId, now]
+  );
+
+  await logUsage({
+    keyCode: keyRow.key_code,
+    ip: req.ip,
+    action: "DISCORD_USER_HWID_RESET",
+    details: JSON.stringify({ product: adminProduct.product, discordUserId }),
+  });
+
+  return res.json({
+    success: true,
+    message: "HWID reset",
+    changed: result.changes,
+  });
+});
+
 const discordListScriptUrls = asyncHandler(async (req, res) => {
   const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
 
@@ -1632,6 +1849,8 @@ app.post("/api/discord/toggle-key", requireDiscordBot, discordToggleKey);
 app.post("/api/discord/delete-key", requireDiscordBot, discordDeleteKey);
 app.post("/api/discord/test-key", requireDiscordBot, discordTestKey);
 app.post("/api/discord/reset-user", requireDiscordBot, discordResetUser);
+app.post("/api/discord/user-script", requireDiscordBot, discordUserScript);
+app.post("/api/discord/user-reset-hwid", requireDiscordBot, discordUserResetHwid);
 app.post("/api/discord/script-url-list", requireDiscordBot, discordListScriptUrls);
 app.post("/api/discord/script-url-add", requireDiscordBot, discordAddScriptUrl);
 app.post("/api/discord/script-url-remove", requireDiscordBot, discordRemoveScriptUrl);
@@ -1646,6 +1865,8 @@ app.post("/api/discord/ghostlua/toggle-key", setDiscordProduct("default"), requi
 app.post("/api/discord/ghostlua/delete-key", setDiscordProduct("default"), requireDiscordBot, discordDeleteKey);
 app.post("/api/discord/ghostlua/test-key", setDiscordProduct("default"), requireDiscordBot, discordTestKey);
 app.post("/api/discord/ghostlua/reset-user", setDiscordProduct("default"), requireDiscordBot, discordResetUser);
+app.post("/api/discord/ghostlua/user-script", setDiscordProduct("default"), requireDiscordBot, discordUserScript);
+app.post("/api/discord/ghostlua/user-reset-hwid", setDiscordProduct("default"), requireDiscordBot, discordUserResetHwid);
 app.post("/api/discord/ghostlua/script-url-list", setDiscordProduct("default"), requireDiscordBot, discordListScriptUrls);
 app.post("/api/discord/ghostlua/script-url-add", setDiscordProduct("default"), requireDiscordBot, discordAddScriptUrl);
 app.post("/api/discord/ghostlua/script-url-remove", setDiscordProduct("default"), requireDiscordBot, discordRemoveScriptUrl);
@@ -1660,6 +1881,8 @@ app.post("/api/discord/ghost-t/toggle-key", setDiscordProduct("ghost_t"), requir
 app.post("/api/discord/ghost-t/delete-key", setDiscordProduct("ghost_t"), requireDiscordBot, discordDeleteKey);
 app.post("/api/discord/ghost-t/test-key", setDiscordProduct("ghost_t"), requireDiscordBot, discordTestKey);
 app.post("/api/discord/ghost-t/reset-user", setDiscordProduct("ghost_t"), requireDiscordBot, discordResetUser);
+app.post("/api/discord/ghost-t/user-script", setDiscordProduct("ghost_t"), requireDiscordBot, discordUserScript);
+app.post("/api/discord/ghost-t/user-reset-hwid", setDiscordProduct("ghost_t"), requireDiscordBot, discordUserResetHwid);
 app.post("/api/discord/ghost-t/script-url-list", setDiscordProduct("ghost_t"), requireDiscordBot, discordListScriptUrls);
 app.post("/api/discord/ghost-t/script-url-add", setDiscordProduct("ghost_t"), requireDiscordBot, discordAddScriptUrl);
 app.post("/api/discord/ghost-t/script-url-remove", setDiscordProduct("ghost_t"), requireDiscordBot, discordRemoveScriptUrl);
@@ -1674,6 +1897,8 @@ app.post("/api/discord/dp/toggle-key", setDiscordProduct("dp"), requireDiscordBo
 app.post("/api/discord/dp/delete-key", setDiscordProduct("dp"), requireDiscordBot, discordDeleteKey);
 app.post("/api/discord/dp/test-key", setDiscordProduct("dp"), requireDiscordBot, discordTestKey);
 app.post("/api/discord/dp/reset-user", setDiscordProduct("dp"), requireDiscordBot, discordResetUser);
+app.post("/api/discord/dp/user-script", setDiscordProduct("dp"), requireDiscordBot, discordUserScript);
+app.post("/api/discord/dp/user-reset-hwid", setDiscordProduct("dp"), requireDiscordBot, discordUserResetHwid);
 app.post("/api/discord/dp/script-url-list", setDiscordProduct("dp"), requireDiscordBot, discordListScriptUrls);
 app.post("/api/discord/dp/script-url-add", setDiscordProduct("dp"), requireDiscordBot, discordAddScriptUrl);
 app.post("/api/discord/dp/script-url-remove", setDiscordProduct("dp"), requireDiscordBot, discordRemoveScriptUrl);
@@ -1690,6 +1915,8 @@ function registerFlatDiscordRoutes(slug, product) {
   app.post(`/api/discord-${slug}-delete-key`, setProduct, requireDiscordBot, discordDeleteKey);
   app.post(`/api/discord-${slug}-test-key`, setProduct, requireDiscordBot, discordTestKey);
   app.post(`/api/discord-${slug}-reset-user`, setProduct, requireDiscordBot, discordResetUser);
+  app.post(`/api/discord-${slug}-user-script`, setProduct, requireDiscordBot, discordUserScript);
+  app.post(`/api/discord-${slug}-user-reset-hwid`, setProduct, requireDiscordBot, discordUserResetHwid);
   app.post(`/api/discord-${slug}-script-url-list`, setProduct, requireDiscordBot, discordListScriptUrls);
   app.post(`/api/discord-${slug}-script-url-add`, setProduct, requireDiscordBot, discordAddScriptUrl);
   app.post(`/api/discord-${slug}-script-url-remove`, setProduct, requireDiscordBot, discordRemoveScriptUrl);
