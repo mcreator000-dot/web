@@ -1808,6 +1808,7 @@ const discordUserLicense = asyncHandler(async (req, res) => {
   return res.json({
     success: true,
     key: keyRow.key_code,
+    isActive: Boolean(keyRow.is_active),
     loadstring: buildLoadstring(getPublicBaseUrl(req), keyRow.key_code),
   });
 });
@@ -1816,6 +1817,7 @@ const discordUserDisableKey = asyncHandler(async (req, res) => {
   const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
   const discordUserId = String(req.body.discordUserId || req.body.userId || "").trim().slice(0, 128);
   const actor = String(req.body.actor || req.body.adminActor || "discord-bot").trim().slice(0, 120);
+  const isActive = req.body.enabled === undefined ? 0 : req.body.enabled ? 1 : 0;
 
   if (!adminProduct) {
     return jsonError(res, 400, "Invalid product", "invalid_product");
@@ -1835,21 +1837,22 @@ const discordUserDisableKey = asyncHandler(async (req, res) => {
   }
 
   await run(
-    "UPDATE license_keys SET is_active = 0 WHERE id = ?",
-    [keyRow.id]
+    "UPDATE license_keys SET is_active = ? WHERE id = ?",
+    [isActive, keyRow.id]
   );
 
   await logUsage({
     keyCode: keyRow.key_code,
     ip: req.ip,
-    action: "DISCORD_USER_KEY_DISABLED",
-    details: JSON.stringify({ product: adminProduct.product, discordUserId, actor }),
+    action: isActive ? "DISCORD_USER_KEY_ENABLED" : "DISCORD_USER_KEY_DISABLED",
+    details: JSON.stringify({ product: adminProduct.product, discordUserId, actor, isActive: Boolean(isActive) }),
   });
 
   return res.json({
     success: true,
-    message: "License disabled",
+    message: isActive ? "License enabled" : "License disabled",
     key: keyRow.key_code,
+    isActive: Boolean(isActive),
   });
 });
 
