@@ -189,11 +189,13 @@ async function initDatabase() {
       is_active INTEGER NOT NULL DEFAULT 1,
       max_devices INTEGER NOT NULL DEFAULT 1,
       product TEXT NOT NULL DEFAULT 'default',
+      discord_user_id TEXT,
       script_url TEXT NOT NULL DEFAULT '',
       notes TEXT NOT NULL DEFAULT ''
     )
   `);
   await ensureColumn("license_keys", "product", "TEXT NOT NULL DEFAULT 'default'");
+  await ensureColumn("license_keys", "discord_user_id", "TEXT");
   await ensureColumn("license_keys", "script_url", "TEXT NOT NULL DEFAULT ''");
   await ensureColumn("license_keys", "expires_after_hours", "REAL");
   await ensureColumn("license_keys", "paused_at", USE_POSTGRES ? "TIMESTAMPTZ" : "TEXT");
@@ -267,6 +269,28 @@ async function initDatabase() {
       created_at ${USE_POSTGRES ? "TIMESTAMPTZ" : "TEXT"} NOT NULL DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(product, discord_user_id)
     )
+  `);
+  await run(`
+    UPDATE license_keys
+    SET discord_user_id = (
+      SELECT duk.discord_user_id
+      FROM discord_user_keys duk
+      WHERE duk.product = license_keys.product
+        AND duk.key_code = license_keys.key_code
+      LIMIT 1
+    )
+    WHERE (discord_user_id IS NULL OR discord_user_id = '')
+      AND EXISTS (
+        SELECT 1
+        FROM discord_user_keys duk
+        WHERE duk.product = license_keys.product
+          AND duk.key_code = license_keys.key_code
+      )
+  `);
+  await run(`
+    CREATE UNIQUE INDEX IF NOT EXISTS license_keys_one_per_discord_user
+    ON license_keys(product, discord_user_id)
+    WHERE discord_user_id IS NOT NULL AND discord_user_id <> ''
   `);
   await run(`
     CREATE TABLE IF NOT EXISTS discord_user_hwid_resets (
@@ -649,6 +673,45 @@ async function createLicenseKey({ product, scriptUrl, expiresAfterHours, maxDevi
       return keyCode;
     } catch (error) {
       if (!isUniqueError(error)) throw error;
+    }
+  }
+
+  return null;
+}
+
+async function createOrGetDiscordUserLicense({ product, discordUserId, scriptUrl, notes, ip }) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const keyCode = generateKey();
+    const result = await run(
+      `INSERT INTO license_keys (
+         key_code, expires_at, expires_after_hours, max_devices, product, discord_user_id, script_url, notes
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT DO NOTHING`,
+      [keyCode, null, null, 1, product, discordUserId, scriptUrl, notes]
+    );
+
+    if (result.changes) {
+      await logUsage({
+        keyCode,
+        ip,
+        action: "KEY_GENERATED",
+        details: JSON.stringify({
+          maxDevices: 1,
+          expiresAfterHours: null,
+          scriptUrl,
+          product,
+          adminActor: discordUserId,
+        }),
+      });
+      return { keyCode, created: true };
+    }
+
+    const existing = await get(
+      "SELECT key_code FROM license_keys WHERE product = ? AND discord_user_id = ? LIMIT 1",
+      [product, discordUserId]
+    );
+    if (existing) {
+      return { keyCode: existing.key_code, created: false };
     }
   }
 
@@ -1663,6 +1726,29 @@ const discordTestKey = asyncHandler(async (req, res) => {
 async function resetDiscordStoredUserData({ product, discordUserId }) {
   const changed = {};
 
+  const linkedKeys = await all(
+    `SELECT key_code FROM discord_user_keys
+     WHERE product = ? AND discord_user_id = ?
+     UNION
+     SELECT key_code FROM discord_test_keys
+     WHERE product = ? AND discord_user_id = ?
+     UNION
+     SELECT key_code FROM license_keys
+     WHERE product = ? AND discord_user_id = ?`,
+    [product, discordUserId, product, discordUserId, product, discordUserId]
+  );
+
+  changed.licenseKeys = 0;
+  for (const row of linkedKeys) {
+    const keyCode = normalizeKey(row.key_code);
+    if (!keyCode) continue;
+    const deleted = await run(
+      "DELETE FROM license_keys WHERE product = ? AND key_code = ?",
+      [product, keyCode]
+    );
+    changed.licenseKeys += Number(deleted.changes || 0);
+  }
+
   const testKeys = await run(
     "DELETE FROM discord_test_keys WHERE product = ? AND discord_user_id = ?",
     [product, discordUserId]
@@ -1680,7 +1766,7 @@ async function resetDiscordStoredUserData({ product, discordUserId }) {
     [product, discordUserId]
   );
   changed.hwidResets = Number(hwidResets.changes || 0);
-  changed.totalChanged = changed.testKeys + changed.userKeys + changed.hwidResets;
+  changed.totalChanged = changed.licenseKeys + changed.testKeys + changed.userKeys + changed.hwidResets;
 
   return changed;
 }
@@ -1755,19 +1841,19 @@ const discordUserScript = asyncHandler(async (req, res) => {
       return jsonError(res, 400, "Missing script URL", "missing_script_url");
     }
 
-    const keyCode = await createLicenseKey({
+    const license = await createOrGetDiscordUserLicense({
       product: adminProduct.product,
+      discordUserId,
       scriptUrl,
-      expiresAfterHours: null,
-      maxDevices: 1,
       notes: discordTag || discordUserId,
       ip: req.ip,
-      actor: discordUserId,
     });
 
-    if (!keyCode) {
+    if (!license) {
       return jsonError(res, 500, "Could not generate a unique key", "generation_failed");
     }
+
+    const keyCode = license.keyCode;
 
     await mapDiscordUserKey({
       product: adminProduct.product,
@@ -1777,7 +1863,7 @@ const discordUserScript = asyncHandler(async (req, res) => {
     });
 
     keyRow = await get("SELECT * FROM license_keys WHERE key_code = ? AND product = ?", [keyCode, adminProduct.product]);
-    created = true;
+    created = license.created;
   }
 
   return res.json({
