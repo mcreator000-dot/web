@@ -13,7 +13,10 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "dev-admin-token";
 const GHOST_T_ADMIN_TOKEN = process.env.GHOST_T_ADMIN_TOKEN || "dev-ghost-t-admin-token";
 const DP_ADMIN_TOKEN = process.env.DP_ADMIN_TOKEN || "";
 const DISCORD_BOT_API_TOKEN = process.env.DISCORD_BOT_API_TOKEN || "";
+const PAYMENT_PROVIDER = String(process.env.PAYMENT_PROVIDER || "manual").trim().toLowerCase();
+const ELDORADO_API_KEY = process.env.ELDORADO_API_KEY || "";
 const DEVICE_HASH_SECRET = process.env.DEVICE_HASH_SECRET || "dev-device-secret";
+const PURCHASE_ORDER_SECRET = process.env.PURCHASE_ORDER_SECRET || DISCORD_BOT_API_TOKEN || DEVICE_HASH_SECRET;
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 const DEFAULT_SCRIPT_URL = process.env.DEFAULT_SCRIPT_URL || "";
 const GHOST_T_SCRIPT_URL = process.env.GHOST_T_SCRIPT_URL || "";
@@ -51,6 +54,14 @@ if (!DISCORD_BOT_API_TOKEN) {
 
 if (DEVICE_HASH_SECRET === "dev-device-secret") {
   console.warn("DEVICE_HASH_SECRET is not set. Set it before production use.");
+}
+
+if (!["manual", "eldorado"].includes(PAYMENT_PROVIDER)) {
+  throw new Error("PAYMENT_PROVIDER must be manual or eldorado.");
+}
+
+if (PAYMENT_PROVIDER === "eldorado" && !ELDORADO_API_KEY) {
+  throw new Error("ELDORADO_API_KEY is required when PAYMENT_PROVIDER=eldorado.");
 }
 
 const PRODUCTS = [
@@ -266,6 +277,43 @@ async function initDatabase() {
       UNIQUE(product, discord_user_id)
     )
   `);
+  await run(`
+    CREATE TABLE IF NOT EXISTS discord_server_settings (
+      product TEXT NOT NULL,
+      guild_id TEXT NOT NULL,
+      access_channel_id TEXT NOT NULL,
+      admin_channel_id TEXT NOT NULL,
+      log_channel_id TEXT NOT NULL,
+      purchase_message_id TEXT,
+      test_message_id TEXT,
+      script_message_id TEXT,
+      license_message_id TEXT,
+      script_url_message_id TEXT,
+      updated_at ${USE_POSTGRES ? "TIMESTAMPTZ" : "TEXT"} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(product, guild_id)
+    )
+  `);
+  await run(`
+    CREATE TABLE IF NOT EXISTS purchase_requests (
+      request_id TEXT PRIMARY KEY,
+      product TEXT NOT NULL,
+      provider TEXT NOT NULL DEFAULT 'manual',
+      order_fingerprint TEXT NOT NULL,
+      order_last4 TEXT NOT NULL DEFAULT '',
+      discord_user_id TEXT NOT NULL,
+      discord_tag TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      role_status TEXT NOT NULL DEFAULT 'not_granted',
+      role_error TEXT NOT NULL DEFAULT '',
+      reviewed_by TEXT NOT NULL DEFAULT '',
+      created_at ${USE_POSTGRES ? "TIMESTAMPTZ" : "TEXT"} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      reviewed_at ${USE_POSTGRES ? "TIMESTAMPTZ" : "TEXT"},
+      role_updated_at ${USE_POSTGRES ? "TIMESTAMPTZ" : "TEXT"},
+      UNIQUE(product, order_fingerprint)
+    )
+  `);
+  await run("CREATE INDEX IF NOT EXISTS purchase_requests_user_status ON purchase_requests(product, discord_user_id, status)");
+  await run("CREATE UNIQUE INDEX IF NOT EXISTS purchase_requests_one_pending_per_user ON purchase_requests(product, discord_user_id) WHERE status = 'pending'");
 }
 
 async function deleteExpiredKeys() {
@@ -447,6 +495,27 @@ function normalizeScriptUrl(value) {
 function buildLoadstring(baseUrl, keyCode) {
   const loaderUrl = `${baseUrl.replace(/\/+$/, "")}/api/loader`;
   return `script_key="${keyCode}"; loadstring(game:HttpGet("${loaderUrl}", true))()`;
+}
+
+function normalizeDiscordId(value) {
+  const id = String(value || "").trim();
+  return /^\d{15,25}$/.test(id) ? id : "";
+}
+
+function normalizeOrderId(value) {
+  const orderId = String(value || "").trim().slice(0, 80);
+  return /^[a-z0-9_-]{3,80}$/i.test(orderId) ? orderId : "";
+}
+
+function fingerprintOrder(product, orderId) {
+  return crypto
+    .createHmac("sha256", PURCHASE_ORDER_SECRET)
+    .update(`${product}:${orderId.toLowerCase()}`)
+    .digest("hex");
+}
+
+function createPurchaseRequestId() {
+  return crypto.randomUUID().replace(/-/g, "").slice(0, 20);
 }
 
 function getAdminProduct(product, defaultProduct = "ghost_t") {
@@ -2007,7 +2076,7 @@ const discordAddScriptUrl = asyncHandler(async (req, res) => {
   await logUsage({
     ip: req.ip,
     action: "DISCORD_SCRIPT_URL_SAVED",
-    details: JSON.stringify({ product: GLOBAL_SCRIPT_PRODUCT, name, url }),
+    details: JSON.stringify({ product: GLOBAL_SCRIPT_PRODUCT, name }),
   });
 
   return res.json({
@@ -2049,6 +2118,219 @@ const discordRemoveScriptUrl = asyncHandler(async (req, res) => {
     message: "Script URL removed",
     data: { name },
   });
+});
+
+async function verifyPurchaseOrder({ orderId }) {
+  if (PAYMENT_PROVIDER === "manual") {
+    return { ok: true, status: "manual_review" };
+  }
+
+  // Eldorado provides the full order API contract after Seller API approval.
+  // This is the only function that needs the provider-specific request later.
+  if (!ELDORADO_API_KEY) {
+    return { ok: false, status: "provider_unavailable" };
+  }
+
+  void orderId;
+  return { ok: false, status: "provider_not_configured" };
+}
+
+const discordGetServerSettings = asyncHandler(async (req, res) => {
+  const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
+  const guildId = normalizeDiscordId(req.body.guildId);
+  if (!adminProduct) return jsonError(res, 400, "Invalid product", "invalid_product");
+  if (!guildId) return jsonError(res, 400, "Invalid guild", "invalid_guild");
+
+  const settings = await get(
+    "SELECT * FROM discord_server_settings WHERE product = ? AND guild_id = ?",
+    [adminProduct.product, guildId]
+  );
+
+  return res.json({ success: true, data: settings || null });
+});
+
+const discordSaveServerSettings = asyncHandler(async (req, res) => {
+  const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
+  const guildId = normalizeDiscordId(req.body.guildId);
+  const accessChannelId = normalizeDiscordId(req.body.accessChannelId);
+  const adminChannelId = normalizeDiscordId(req.body.adminChannelId);
+  const logChannelId = normalizeDiscordId(req.body.logChannelId);
+  if (!adminProduct) return jsonError(res, 400, "Invalid product", "invalid_product");
+  if (!guildId || !accessChannelId || !adminChannelId || !logChannelId) {
+    return jsonError(res, 400, "Invalid Discord server settings", "invalid_server_settings");
+  }
+
+  const panelMessages = req.body.panelMessages || {};
+  const messageIds = ["purchase", "test", "script", "license", "scriptUrl"].map((name) => {
+    const value = panelMessages[name];
+    return value ? normalizeDiscordId(value) : null;
+  });
+
+  await run(
+    `INSERT INTO discord_server_settings (
+       product, guild_id, access_channel_id, admin_channel_id, log_channel_id,
+       purchase_message_id, test_message_id, script_message_id, license_message_id, script_url_message_id, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(product, guild_id) DO UPDATE SET
+       access_channel_id = excluded.access_channel_id,
+       admin_channel_id = excluded.admin_channel_id,
+       log_channel_id = excluded.log_channel_id,
+       purchase_message_id = COALESCE(excluded.purchase_message_id, discord_server_settings.purchase_message_id),
+       test_message_id = COALESCE(excluded.test_message_id, discord_server_settings.test_message_id),
+       script_message_id = COALESCE(excluded.script_message_id, discord_server_settings.script_message_id),
+       license_message_id = COALESCE(excluded.license_message_id, discord_server_settings.license_message_id),
+       script_url_message_id = COALESCE(excluded.script_url_message_id, discord_server_settings.script_url_message_id),
+       updated_at = CURRENT_TIMESTAMP`,
+    [adminProduct.product, guildId, accessChannelId, adminChannelId, logChannelId, ...messageIds]
+  );
+
+  const settings = await get(
+    "SELECT * FROM discord_server_settings WHERE product = ? AND guild_id = ?",
+    [adminProduct.product, guildId]
+  );
+  return res.json({ success: true, data: settings });
+});
+
+const discordCreatePurchaseRequest = asyncHandler(async (req, res) => {
+  const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
+  const orderId = normalizeOrderId(req.body.orderId);
+  const discordUserId = normalizeDiscordId(req.body.discordUserId);
+  const discordTag = String(req.body.discordTag || "").trim().slice(0, 100);
+  if (!adminProduct) return jsonError(res, 400, "Invalid product", "invalid_product");
+  if (!orderId) return jsonError(res, 400, "Invalid order ID", "invalid_order_id");
+  if (!discordUserId) return jsonError(res, 400, "Invalid Discord user", "invalid_discord_user");
+
+  const pendingForUser = await get(
+    "SELECT request_id FROM purchase_requests WHERE product = ? AND discord_user_id = ? AND status = 'pending'",
+    [adminProduct.product, discordUserId]
+  );
+  if (pendingForUser) {
+    return jsonError(res, 409, "You already have a purchase pending.", "purchase_pending");
+  }
+
+  const verification = await verifyPurchaseOrder({ orderId, product: adminProduct.product });
+  if (!verification.ok) {
+    return jsonError(res, 503, "Purchase verification is unavailable.", verification.status);
+  }
+
+  const fingerprint = fingerprintOrder(adminProduct.product, orderId);
+  const existing = await get(
+    "SELECT request_id, status FROM purchase_requests WHERE product = ? AND order_fingerprint = ?",
+    [adminProduct.product, fingerprint]
+  );
+  if (existing) {
+    if (existing.status === "denied") {
+      await run(
+        `UPDATE purchase_requests
+         SET discord_user_id = ?, discord_tag = ?, status = 'pending', role_status = 'not_granted',
+             role_error = '', reviewed_by = '', reviewed_at = NULL, created_at = CURRENT_TIMESTAMP
+         WHERE request_id = ? AND product = ? AND status = 'denied'`,
+        [discordUserId, discordTag, existing.request_id, adminProduct.product]
+      );
+      return res.json({
+        success: true,
+        data: { id: existing.request_id, orderId, userId: discordUserId, userTag: discordTag, provider: PAYMENT_PROVIDER },
+      });
+    }
+    const message = existing.status === "approved" ? "Order already redeemed." : "Order already submitted.";
+    return jsonError(res, 409, message, existing.status === "approved" ? "order_redeemed" : "order_submitted");
+  }
+
+  const requestId = createPurchaseRequestId();
+  await run(
+    `INSERT INTO purchase_requests (
+     request_id, product, provider, order_fingerprint, order_last4, discord_user_id, discord_tag, status, role_status
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 'not_granted')
+     ON CONFLICT DO NOTHING`,
+    [requestId, adminProduct.product, PAYMENT_PROVIDER, fingerprint, orderId.slice(-4), discordUserId, discordTag]
+  );
+
+  const stored = await get(
+    "SELECT request_id, status FROM purchase_requests WHERE product = ? AND order_fingerprint = ?",
+    [adminProduct.product, fingerprint]
+  );
+  if (!stored || stored.request_id !== requestId) {
+    const message = stored?.status === "approved" ? "Order already redeemed." : "Order already submitted.";
+    return jsonError(res, 409, message, stored?.status === "approved" ? "order_redeemed" : "order_submitted");
+  }
+
+  await logUsage({
+    ip: req.ip,
+    action: "DISCORD_PURCHASE_REQUESTED",
+    details: JSON.stringify({ product: adminProduct.product, requestId, discordUserId, provider: PAYMENT_PROVIDER }),
+  });
+
+  return res.json({
+    success: true,
+    data: { id: requestId, orderId, userId: discordUserId, userTag: discordTag, provider: PAYMENT_PROVIDER },
+  });
+});
+
+const discordReviewPurchaseRequest = asyncHandler(async (req, res) => {
+  const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
+  const requestId = String(req.body.requestId || "").trim().slice(0, 32);
+  const action = String(req.body.action || "").trim().toLowerCase();
+  const actor = String(req.body.actor || "discord-admin").trim().slice(0, 120);
+  if (!adminProduct) return jsonError(res, 400, "Invalid product", "invalid_product");
+  if (!requestId || !["approve", "deny"].includes(action)) {
+    return jsonError(res, 400, "Invalid purchase review", "invalid_purchase_review");
+  }
+
+  let request = await get(
+    "SELECT * FROM purchase_requests WHERE request_id = ? AND product = ?",
+    [requestId, adminProduct.product]
+  );
+  if (!request) return jsonError(res, 404, "Purchase request not found.", "purchase_not_found");
+
+  if (action === "approve" && request.status === "approved") {
+    return res.json({ success: true, data: request, retryRole: request.role_status !== "granted" });
+  }
+  if (request.status !== "pending") {
+    return jsonError(res, 409, "Purchase request already reviewed.", "purchase_reviewed");
+  }
+
+  const status = action === "approve" ? "approved" : "denied";
+  const roleStatus = action === "approve" ? "pending" : "not_granted";
+  const updateResult = await run(
+    `UPDATE purchase_requests
+     SET status = ?, role_status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP
+     WHERE request_id = ? AND product = ? AND status = 'pending'`,
+    [status, roleStatus, actor, requestId, adminProduct.product]
+  );
+  request = await get(
+    "SELECT * FROM purchase_requests WHERE request_id = ? AND product = ?",
+    [requestId, adminProduct.product]
+  );
+  if (!updateResult.changes) {
+    if (action === "approve" && request?.status === "approved") {
+      return res.json({ success: true, data: request, retryRole: request.role_status !== "granted" });
+    }
+    return jsonError(res, 409, "Purchase request already reviewed.", "purchase_reviewed");
+  }
+
+  await logUsage({
+    ip: req.ip,
+    action: action === "approve" ? "DISCORD_PURCHASE_APPROVED" : "DISCORD_PURCHASE_DENIED",
+    details: JSON.stringify({ product: adminProduct.product, requestId, discordUserId: request.discord_user_id, actor }),
+  });
+  return res.json({ success: true, data: request, retryRole: action === "approve" });
+});
+
+const discordSetPurchaseRoleResult = asyncHandler(async (req, res) => {
+  const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
+  const requestId = String(req.body.requestId || "").trim().slice(0, 32);
+  const granted = req.body.granted === true;
+  const roleError = granted ? "" : String(req.body.error || "Role grant failed").trim().slice(0, 300);
+  if (!adminProduct) return jsonError(res, 400, "Invalid product", "invalid_product");
+
+  const result = await run(
+    `UPDATE purchase_requests
+     SET role_status = ?, role_error = ?, role_updated_at = CURRENT_TIMESTAMP
+     WHERE request_id = ? AND product = ? AND status = 'approved'`,
+    [granted ? "granted" : "failed", roleError, requestId, adminProduct.product]
+  );
+  if (!result.changes) return jsonError(res, 404, "Approved purchase not found.", "purchase_not_found");
+  return res.json({ success: true });
 });
 
 app.post("/api/discord/get-key", requireDiscordBot, discordGetKey);
@@ -2152,6 +2434,11 @@ function registerFlatDiscordRoutes(slug, product) {
   app.post(`/api/discord-${slug}-script-url-list`, setProduct, requireDiscordBot, discordListScriptUrls);
   app.post(`/api/discord-${slug}-script-url-add`, setProduct, requireDiscordBot, discordAddScriptUrl);
   app.post(`/api/discord-${slug}-script-url-remove`, setProduct, requireDiscordBot, discordRemoveScriptUrl);
+  app.post(`/api/discord-${slug}-server-settings-get`, setProduct, requireDiscordBot, discordGetServerSettings);
+  app.post(`/api/discord-${slug}-server-settings-save`, setProduct, requireDiscordBot, discordSaveServerSettings);
+  app.post(`/api/discord-${slug}-purchase-request`, setProduct, requireDiscordBot, discordCreatePurchaseRequest);
+  app.post(`/api/discord-${slug}-purchase-review`, setProduct, requireDiscordBot, discordReviewPurchaseRequest);
+  app.post(`/api/discord-${slug}-purchase-role-result`, setProduct, requireDiscordBot, discordSetPurchaseRoleResult);
 }
 
 registerFlatDiscordRoutes("ghostlua", "default");

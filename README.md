@@ -38,6 +38,9 @@ ADMIN_TOKEN=replace-with-a-long-random-admin-token
 GHOST_T_ADMIN_TOKEN=replace-with-a-long-random-ghost-t-admin-token
 DP_ADMIN_TOKEN=replace-with-a-long-random-dp-admin-token
 DISCORD_BOT_API_TOKEN=
+PAYMENT_PROVIDER=manual
+PURCHASE_ORDER_SECRET=replace-with-a-long-random-purchase-order-secret
+ELDORADO_API_KEY=
 DEVICE_HASH_SECRET=replace-with-a-long-random-device-secret
 CORS_ORIGIN=https://your-project.vercel.app
 PUBLIC_BASE_URL=https://your-project.vercel.app
@@ -66,6 +69,8 @@ npx vercel env add ADMIN_TOKEN production
 npx vercel env add GHOST_T_ADMIN_TOKEN production
 npx vercel env add DP_ADMIN_TOKEN production
 npx vercel env add DISCORD_BOT_API_TOKEN production
+npx vercel env add PAYMENT_PROVIDER production
+npx vercel env add PURCHASE_ORDER_SECRET production
 npx vercel env add DEVICE_HASH_SECRET production
 npx vercel env add CORS_ORIGIN production
 npx vercel env add PUBLIC_BASE_URL production
@@ -150,6 +155,8 @@ Use scripts and script URLs you control. Keep admin tokens in environment variab
 ## Discord Bot API
 
 Discord bot endpoints require either `X-Discord-Bot-Token: <DISCORD_BOT_API_TOKEN>` or `Authorization: Bearer <DISCORD_BOT_API_TOKEN>`. Use a separate Discord bot token instead of a dashboard admin token so the bot host does not have full dashboard access.
+
+Purchase requests, redeemed-order protection, Discord channel settings, and panel message IDs are stored in Postgres. Use `PAYMENT_PROVIDER=manual` for private administrator approval. The Eldorado provider adapter is isolated in `verifyPurchaseOrder` and remains disabled until an approved API key and its API contract are available.
 
 Use separate Discord API paths for each dashboard:
 
