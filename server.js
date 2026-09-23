@@ -318,6 +318,14 @@ async function initDatabase() {
     )
   `);
   await run(`
+    CREATE TABLE IF NOT EXISTS discord_script_update_notices (
+      discord_user_id TEXT PRIMARY KEY,
+      dm_channel_id TEXT NOT NULL,
+      dm_message_id TEXT NOT NULL,
+      updated_at ${USE_POSTGRES ? "TIMESTAMPTZ" : "TEXT"} NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await run(`
     CREATE TABLE IF NOT EXISTS purchase_requests (
       request_id TEXT PRIMARY KEY,
       product TEXT NOT NULL,
@@ -1771,6 +1779,110 @@ async function resetDiscordStoredUserData({ product, discordUserId }) {
   return changed;
 }
 
+async function resetDiscordBurnerData({ product, discordUserId }) {
+  const rows = await all(
+    "SELECT key_code FROM discord_test_keys WHERE product = ? AND discord_user_id = ?",
+    [product, discordUserId]
+  );
+
+  let licenseKeys = 0;
+  for (const row of rows) {
+    const keyCode = normalizeKey(row.key_code);
+    if (!keyCode) continue;
+    const deleted = await run(
+      "DELETE FROM license_keys WHERE product = ? AND key_code = ?",
+      [product, keyCode]
+    );
+    licenseKeys += Number(deleted.changes || 0);
+  }
+
+  const testKeys = await run(
+    "DELETE FROM discord_test_keys WHERE product = ? AND discord_user_id = ?",
+    [product, discordUserId]
+  );
+
+  return {
+    licenseKeys,
+    testKeys: Number(testKeys.changes || 0),
+    totalChanged: licenseKeys + Number(testKeys.changes || 0),
+  };
+}
+
+const discordBurnReset = asyncHandler(async (req, res) => {
+  const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
+  const discordUserId = normalizeDiscordId(req.body.discordUserId || req.body.userId);
+  const discordTag = String(req.body.discordTag || req.body.user || "").trim().slice(0, 128);
+  const actor = normalizeDiscordActor(req);
+
+  if (!adminProduct) return jsonError(res, 400, "Invalid product", "invalid_product");
+  if (!discordUserId) return jsonError(res, 400, "Invalid Discord user", "invalid_discord_user");
+
+  const changed = await resetDiscordBurnerData({
+    product: adminProduct.product,
+    discordUserId,
+  });
+
+  await logUsage({
+    ip: req.ip,
+    action: "DISCORD_BURNER_RESET",
+    details: JSON.stringify({
+      product: adminProduct.product,
+      discordUserId,
+      discordTag,
+      actor,
+      changed,
+    }),
+  });
+
+  return res.json({
+    success: true,
+    message: "Burner reset",
+    changed: changed.totalChanged,
+    data: { discordUserId, discordTag, ...changed },
+  });
+});
+
+const discordForceUserHwidReset = asyncHandler(async (req, res) => {
+  const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
+  const discordUserId = normalizeDiscordId(req.body.discordUserId || req.body.userId);
+  const actor = normalizeDiscordActor(req);
+
+  if (!adminProduct) return jsonError(res, 400, "Invalid product", "invalid_product");
+  if (!discordUserId) return jsonError(res, 400, "Invalid Discord user", "invalid_discord_user");
+
+  const keyRow = await findDiscordUserKey({
+    product: adminProduct.product,
+    discordUserId,
+  });
+  if (!keyRow) {
+    return jsonError(res, 404, "No key found for this Discord user", "user_key_not_found");
+  }
+
+  const devices = await run("UPDATE key_devices SET active = 0 WHERE key_id = ?", [keyRow.id]);
+  const cooldown = await run(
+    "DELETE FROM discord_user_hwid_resets WHERE product = ? AND discord_user_id = ?",
+    [adminProduct.product, discordUserId]
+  );
+
+  await logUsage({
+    keyCode: keyRow.key_code,
+    ip: req.ip,
+    action: "DISCORD_ADMIN_HWID_RESET",
+    details: JSON.stringify({ product: adminProduct.product, discordUserId, actor }),
+  });
+
+  return res.json({
+    success: true,
+    message: "HWID and cooldown reset",
+    changed: Number(devices.changes || 0) + Number(cooldown.changes || 0),
+    data: {
+      discordUserId,
+      devices: Number(devices.changes || 0),
+      cooldowns: Number(cooldown.changes || 0),
+    },
+  });
+});
+
 const discordResetUser = asyncHandler(async (req, res) => {
   const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
   const discordUserId = String(req.body.discordUserId || req.body.userId || "").trim().slice(0, 128);
@@ -2103,6 +2215,42 @@ const discordUserDisableLicense = asyncHandler(async (req, res) => {
   });
 });
 
+async function invalidateDiscordManagedKeys() {
+  const userRows = await all(`
+    SELECT discord_user_id FROM discord_user_keys
+    UNION
+    SELECT discord_user_id FROM discord_test_keys
+    UNION
+    SELECT discord_user_id FROM license_keys
+    WHERE discord_user_id IS NOT NULL AND discord_user_id <> ''
+  `);
+  const keyRows = await all(`
+    SELECT key_code FROM discord_user_keys
+    UNION
+    SELECT key_code FROM discord_test_keys
+    UNION
+    SELECT key_code FROM license_keys
+    WHERE discord_user_id IS NOT NULL AND discord_user_id <> ''
+  `);
+
+  let keysDeleted = 0;
+  for (const row of keyRows) {
+    const keyCode = normalizeKey(row.key_code);
+    if (!keyCode) continue;
+    const deleted = await run("DELETE FROM license_keys WHERE key_code = ?", [keyCode]);
+    keysDeleted += Number(deleted.changes || 0);
+  }
+
+  await run("DELETE FROM discord_user_keys");
+  await run("DELETE FROM discord_test_keys");
+  await run("DELETE FROM discord_user_hwid_resets");
+
+  return {
+    affectedUsers: userRows.map((row) => normalizeDiscordId(row.discord_user_id)).filter(Boolean),
+    keysDeleted,
+  };
+}
+
 const discordListScriptUrls = asyncHandler(async (req, res) => {
   const adminProduct = getAdminProduct(req.discordProduct || req.body.product);
 
@@ -2152,6 +2300,12 @@ const discordAddScriptUrl = asyncHandler(async (req, res) => {
     return jsonError(res, 400, "Missing script URL", "missing_script_url");
   }
 
+  const existing = await get(
+    "SELECT url FROM script_urls WHERE product = ? AND name = ?",
+    [GLOBAL_SCRIPT_PRODUCT, name]
+  );
+  const changed = !existing || existing.url !== url;
+
   await run(
     `INSERT INTO script_urls (product, name, url)
      VALUES (?, ?, ?)
@@ -2165,10 +2319,14 @@ const discordAddScriptUrl = asyncHandler(async (req, res) => {
     details: JSON.stringify({ product: GLOBAL_SCRIPT_PRODUCT, name }),
   });
 
+  const invalidated = changed
+    ? await invalidateDiscordManagedKeys()
+    : { affectedUsers: [], keysDeleted: 0 };
+
   return res.json({
     success: true,
     message: "Script URL saved",
-    data: { name, url },
+    data: { name, url, changed, ...invalidated },
   });
 });
 
@@ -2199,11 +2357,58 @@ const discordRemoveScriptUrl = asyncHandler(async (req, res) => {
     details: JSON.stringify({ product: GLOBAL_SCRIPT_PRODUCT, name }),
   });
 
+  const invalidated = await invalidateDiscordManagedKeys();
+
   return res.json({
     success: true,
     message: "Script URL removed",
-    data: { name },
+    data: { name, changed: true, ...invalidated },
   });
+});
+
+const discordSaveScriptUpdateNotice = asyncHandler(async (req, res) => {
+  const discordUserId = normalizeDiscordId(req.body.discordUserId);
+  const dmChannelId = normalizeDiscordId(req.body.dmChannelId);
+  const dmMessageId = normalizeDiscordId(req.body.dmMessageId);
+  if (!discordUserId || !dmChannelId || !dmMessageId) {
+    return jsonError(res, 400, "Invalid script update notice", "invalid_script_update_notice");
+  }
+
+  const previous = await get(
+    "SELECT dm_channel_id, dm_message_id FROM discord_script_update_notices WHERE discord_user_id = ?",
+    [discordUserId]
+  );
+  await run(
+    `INSERT INTO discord_script_update_notices (discord_user_id, dm_channel_id, dm_message_id, updated_at)
+     VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(discord_user_id) DO UPDATE SET
+       dm_channel_id = excluded.dm_channel_id,
+       dm_message_id = excluded.dm_message_id,
+       updated_at = CURRENT_TIMESTAMP`,
+    [discordUserId, dmChannelId, dmMessageId]
+  );
+
+  return res.json({ success: true, data: { previous } });
+});
+
+const discordGetScriptUpdateNotice = asyncHandler(async (req, res) => {
+  const discordUserId = normalizeDiscordId(req.body.discordUserId);
+  if (!discordUserId) return jsonError(res, 400, "Invalid Discord user", "invalid_discord_user");
+  const notice = await get(
+    "SELECT dm_channel_id, dm_message_id FROM discord_script_update_notices WHERE discord_user_id = ?",
+    [discordUserId]
+  );
+  return res.json({ success: true, data: notice || null });
+});
+
+const discordClearScriptUpdateNotice = asyncHandler(async (req, res) => {
+  const discordUserId = normalizeDiscordId(req.body.discordUserId);
+  if (!discordUserId) return jsonError(res, 400, "Invalid Discord user", "invalid_discord_user");
+  const result = await run(
+    "DELETE FROM discord_script_update_notices WHERE discord_user_id = ?",
+    [discordUserId]
+  );
+  return res.json({ success: true, changed: Number(result.changes || 0) });
 });
 
 async function verifyPurchaseOrder({ orderId }) {
@@ -2428,9 +2633,11 @@ app.post("/api/discord/list-keys", requireDiscordBot, discordListKeys);
 app.post("/api/discord/toggle-key", requireDiscordBot, discordToggleKey);
 app.post("/api/discord/delete-key", requireDiscordBot, discordDeleteKey);
 app.post("/api/discord/test-key", requireDiscordBot, discordTestKey);
+app.post("/api/discord/burn-reset", requireDiscordBot, discordBurnReset);
 app.post("/api/discord/reset-user", requireDiscordBot, discordResetUser);
 app.post("/api/discord/user-script", requireDiscordBot, discordUserScript);
 app.post("/api/discord/user-reset-hwid", requireDiscordBot, discordUserResetHwid);
+app.post("/api/discord/user-force-reset-hwid", requireDiscordBot, discordForceUserHwidReset);
 app.post("/api/discord/user-license", requireDiscordBot, discordUserLicense);
 app.post("/api/discord/user-disable-key", requireDiscordBot, discordUserDisableKey);
 app.post("/api/discord/user-remove-key", requireDiscordBot, discordUserRemoveKey);
@@ -2438,6 +2645,9 @@ app.post("/api/discord/user-disable-license", requireDiscordBot, discordUserDisa
 app.post("/api/discord/script-url-list", requireDiscordBot, discordListScriptUrls);
 app.post("/api/discord/script-url-add", requireDiscordBot, discordAddScriptUrl);
 app.post("/api/discord/script-url-remove", requireDiscordBot, discordRemoveScriptUrl);
+app.post("/api/discord/script-update-notice-save", requireDiscordBot, discordSaveScriptUpdateNotice);
+app.post("/api/discord/script-update-notice-get", requireDiscordBot, discordGetScriptUpdateNotice);
+app.post("/api/discord/script-update-notice-clear", requireDiscordBot, discordClearScriptUpdateNotice);
 
 app.post("/api/discord/ghostlua/get-key", setDiscordProduct("default"), requireDiscordBot, discordGetKey);
 app.post("/api/discord/ghostlua/redeem-key", setDiscordProduct("default"), requireDiscordBot, discordRedeemKey);
@@ -2448,9 +2658,11 @@ app.post("/api/discord/ghostlua/list-keys", setDiscordProduct("default"), requir
 app.post("/api/discord/ghostlua/toggle-key", setDiscordProduct("default"), requireDiscordBot, discordToggleKey);
 app.post("/api/discord/ghostlua/delete-key", setDiscordProduct("default"), requireDiscordBot, discordDeleteKey);
 app.post("/api/discord/ghostlua/test-key", setDiscordProduct("default"), requireDiscordBot, discordTestKey);
+app.post("/api/discord/ghostlua/burn-reset", setDiscordProduct("default"), requireDiscordBot, discordBurnReset);
 app.post("/api/discord/ghostlua/reset-user", setDiscordProduct("default"), requireDiscordBot, discordResetUser);
 app.post("/api/discord/ghostlua/user-script", setDiscordProduct("default"), requireDiscordBot, discordUserScript);
 app.post("/api/discord/ghostlua/user-reset-hwid", setDiscordProduct("default"), requireDiscordBot, discordUserResetHwid);
+app.post("/api/discord/ghostlua/user-force-reset-hwid", setDiscordProduct("default"), requireDiscordBot, discordForceUserHwidReset);
 app.post("/api/discord/ghostlua/user-license", setDiscordProduct("default"), requireDiscordBot, discordUserLicense);
 app.post("/api/discord/ghostlua/user-disable-key", setDiscordProduct("default"), requireDiscordBot, discordUserDisableKey);
 app.post("/api/discord/ghostlua/user-remove-key", setDiscordProduct("default"), requireDiscordBot, discordUserRemoveKey);
@@ -2458,6 +2670,9 @@ app.post("/api/discord/ghostlua/user-disable-license", setDiscordProduct("defaul
 app.post("/api/discord/ghostlua/script-url-list", setDiscordProduct("default"), requireDiscordBot, discordListScriptUrls);
 app.post("/api/discord/ghostlua/script-url-add", setDiscordProduct("default"), requireDiscordBot, discordAddScriptUrl);
 app.post("/api/discord/ghostlua/script-url-remove", setDiscordProduct("default"), requireDiscordBot, discordRemoveScriptUrl);
+app.post("/api/discord/ghostlua/script-update-notice-save", setDiscordProduct("default"), requireDiscordBot, discordSaveScriptUpdateNotice);
+app.post("/api/discord/ghostlua/script-update-notice-get", setDiscordProduct("default"), requireDiscordBot, discordGetScriptUpdateNotice);
+app.post("/api/discord/ghostlua/script-update-notice-clear", setDiscordProduct("default"), requireDiscordBot, discordClearScriptUpdateNotice);
 
 app.post("/api/discord/ghost-t/get-key", setDiscordProduct("ghost_t"), requireDiscordBot, discordGetKey);
 app.post("/api/discord/ghost-t/redeem-key", setDiscordProduct("ghost_t"), requireDiscordBot, discordRedeemKey);
@@ -2468,9 +2683,11 @@ app.post("/api/discord/ghost-t/list-keys", setDiscordProduct("ghost_t"), require
 app.post("/api/discord/ghost-t/toggle-key", setDiscordProduct("ghost_t"), requireDiscordBot, discordToggleKey);
 app.post("/api/discord/ghost-t/delete-key", setDiscordProduct("ghost_t"), requireDiscordBot, discordDeleteKey);
 app.post("/api/discord/ghost-t/test-key", setDiscordProduct("ghost_t"), requireDiscordBot, discordTestKey);
+app.post("/api/discord/ghost-t/burn-reset", setDiscordProduct("ghost_t"), requireDiscordBot, discordBurnReset);
 app.post("/api/discord/ghost-t/reset-user", setDiscordProduct("ghost_t"), requireDiscordBot, discordResetUser);
 app.post("/api/discord/ghost-t/user-script", setDiscordProduct("ghost_t"), requireDiscordBot, discordUserScript);
 app.post("/api/discord/ghost-t/user-reset-hwid", setDiscordProduct("ghost_t"), requireDiscordBot, discordUserResetHwid);
+app.post("/api/discord/ghost-t/user-force-reset-hwid", setDiscordProduct("ghost_t"), requireDiscordBot, discordForceUserHwidReset);
 app.post("/api/discord/ghost-t/user-license", setDiscordProduct("ghost_t"), requireDiscordBot, discordUserLicense);
 app.post("/api/discord/ghost-t/user-disable-key", setDiscordProduct("ghost_t"), requireDiscordBot, discordUserDisableKey);
 app.post("/api/discord/ghost-t/user-remove-key", setDiscordProduct("ghost_t"), requireDiscordBot, discordUserRemoveKey);
@@ -2478,6 +2695,9 @@ app.post("/api/discord/ghost-t/user-disable-license", setDiscordProduct("ghost_t
 app.post("/api/discord/ghost-t/script-url-list", setDiscordProduct("ghost_t"), requireDiscordBot, discordListScriptUrls);
 app.post("/api/discord/ghost-t/script-url-add", setDiscordProduct("ghost_t"), requireDiscordBot, discordAddScriptUrl);
 app.post("/api/discord/ghost-t/script-url-remove", setDiscordProduct("ghost_t"), requireDiscordBot, discordRemoveScriptUrl);
+app.post("/api/discord/ghost-t/script-update-notice-save", setDiscordProduct("ghost_t"), requireDiscordBot, discordSaveScriptUpdateNotice);
+app.post("/api/discord/ghost-t/script-update-notice-get", setDiscordProduct("ghost_t"), requireDiscordBot, discordGetScriptUpdateNotice);
+app.post("/api/discord/ghost-t/script-update-notice-clear", setDiscordProduct("ghost_t"), requireDiscordBot, discordClearScriptUpdateNotice);
 
 app.post("/api/discord/dp/get-key", setDiscordProduct("dp"), requireDiscordBot, discordGetKey);
 app.post("/api/discord/dp/redeem-key", setDiscordProduct("dp"), requireDiscordBot, discordRedeemKey);
@@ -2488,9 +2708,11 @@ app.post("/api/discord/dp/list-keys", setDiscordProduct("dp"), requireDiscordBot
 app.post("/api/discord/dp/toggle-key", setDiscordProduct("dp"), requireDiscordBot, discordToggleKey);
 app.post("/api/discord/dp/delete-key", setDiscordProduct("dp"), requireDiscordBot, discordDeleteKey);
 app.post("/api/discord/dp/test-key", setDiscordProduct("dp"), requireDiscordBot, discordTestKey);
+app.post("/api/discord/dp/burn-reset", setDiscordProduct("dp"), requireDiscordBot, discordBurnReset);
 app.post("/api/discord/dp/reset-user", setDiscordProduct("dp"), requireDiscordBot, discordResetUser);
 app.post("/api/discord/dp/user-script", setDiscordProduct("dp"), requireDiscordBot, discordUserScript);
 app.post("/api/discord/dp/user-reset-hwid", setDiscordProduct("dp"), requireDiscordBot, discordUserResetHwid);
+app.post("/api/discord/dp/user-force-reset-hwid", setDiscordProduct("dp"), requireDiscordBot, discordForceUserHwidReset);
 app.post("/api/discord/dp/user-license", setDiscordProduct("dp"), requireDiscordBot, discordUserLicense);
 app.post("/api/discord/dp/user-disable-key", setDiscordProduct("dp"), requireDiscordBot, discordUserDisableKey);
 app.post("/api/discord/dp/user-remove-key", setDiscordProduct("dp"), requireDiscordBot, discordUserRemoveKey);
@@ -2498,6 +2720,9 @@ app.post("/api/discord/dp/user-disable-license", setDiscordProduct("dp"), requir
 app.post("/api/discord/dp/script-url-list", setDiscordProduct("dp"), requireDiscordBot, discordListScriptUrls);
 app.post("/api/discord/dp/script-url-add", setDiscordProduct("dp"), requireDiscordBot, discordAddScriptUrl);
 app.post("/api/discord/dp/script-url-remove", setDiscordProduct("dp"), requireDiscordBot, discordRemoveScriptUrl);
+app.post("/api/discord/dp/script-update-notice-save", setDiscordProduct("dp"), requireDiscordBot, discordSaveScriptUpdateNotice);
+app.post("/api/discord/dp/script-update-notice-get", setDiscordProduct("dp"), requireDiscordBot, discordGetScriptUpdateNotice);
+app.post("/api/discord/dp/script-update-notice-clear", setDiscordProduct("dp"), requireDiscordBot, discordClearScriptUpdateNotice);
 
 function registerFlatDiscordRoutes(slug, product) {
   const setProduct = setDiscordProduct(product);
@@ -2510,9 +2735,11 @@ function registerFlatDiscordRoutes(slug, product) {
   app.post(`/api/discord-${slug}-toggle-key`, setProduct, requireDiscordBot, discordToggleKey);
   app.post(`/api/discord-${slug}-delete-key`, setProduct, requireDiscordBot, discordDeleteKey);
   app.post(`/api/discord-${slug}-test-key`, setProduct, requireDiscordBot, discordTestKey);
+  app.post(`/api/discord-${slug}-burn-reset`, setProduct, requireDiscordBot, discordBurnReset);
   app.post(`/api/discord-${slug}-reset-user`, setProduct, requireDiscordBot, discordResetUser);
   app.post(`/api/discord-${slug}-user-script`, setProduct, requireDiscordBot, discordUserScript);
   app.post(`/api/discord-${slug}-user-reset-hwid`, setProduct, requireDiscordBot, discordUserResetHwid);
+  app.post(`/api/discord-${slug}-user-force-reset-hwid`, setProduct, requireDiscordBot, discordForceUserHwidReset);
   app.post(`/api/discord-${slug}-user-license`, setProduct, requireDiscordBot, discordUserLicense);
   app.post(`/api/discord-${slug}-user-disable-key`, setProduct, requireDiscordBot, discordUserDisableKey);
   app.post(`/api/discord-${slug}-user-remove-key`, setProduct, requireDiscordBot, discordUserRemoveKey);
@@ -2520,6 +2747,9 @@ function registerFlatDiscordRoutes(slug, product) {
   app.post(`/api/discord-${slug}-script-url-list`, setProduct, requireDiscordBot, discordListScriptUrls);
   app.post(`/api/discord-${slug}-script-url-add`, setProduct, requireDiscordBot, discordAddScriptUrl);
   app.post(`/api/discord-${slug}-script-url-remove`, setProduct, requireDiscordBot, discordRemoveScriptUrl);
+  app.post(`/api/discord-${slug}-script-update-notice-save`, setProduct, requireDiscordBot, discordSaveScriptUpdateNotice);
+  app.post(`/api/discord-${slug}-script-update-notice-get`, setProduct, requireDiscordBot, discordGetScriptUpdateNotice);
+  app.post(`/api/discord-${slug}-script-update-notice-clear`, setProduct, requireDiscordBot, discordClearScriptUpdateNotice);
   app.post(`/api/discord-${slug}-server-settings-get`, setProduct, requireDiscordBot, discordGetServerSettings);
   app.post(`/api/discord-${slug}-server-settings-save`, setProduct, requireDiscordBot, discordSaveServerSettings);
   app.post(`/api/discord-${slug}-purchase-request`, setProduct, requireDiscordBot, discordCreatePurchaseRequest);
