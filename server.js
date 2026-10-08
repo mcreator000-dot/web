@@ -1192,6 +1192,13 @@ if not ok then
 end
 
 local function runScript(source)
+  -- The payload is NEVER left on disk.
+  --
+  -- The previous version wrote it to DeltaKeySystem/payload.lua and left it there permanently. That
+  -- silently defeated the entire point of obfuscating the build: anyone could open that file and
+  -- read the delivered script directly, no deobfuscator required. The file is now written, loaded,
+  -- and removed in the same breath, so the on-disk copy exists for a fraction of a second instead
+  -- of forever. loadfile returns a compiled function, so the file is no longer needed afterwards.
   if loadfile and writefile then
     local folder = "DeltaKeySystem"
     local path = folder .. "/payload.lua"
@@ -1208,6 +1215,10 @@ local function runScript(source)
 
     if wrote then
       local fileFn, fileErr = loadfile(path)
+      -- Remove the on-disk copy immediately, whether or not the load succeeded.
+      if delfile then
+        pcall(function() delfile(path) end)
+      end
       if fileFn then
         return pcall(fileFn)
       end
@@ -1252,9 +1263,24 @@ app.post("/api/generate-key", requireAdmin, asyncHandler(async (req, res) => {
   const expiresIn = Math.max(0, Number(requestedExpiresIn || 0));
   const expiresInUnit = String(req.body.expiresInUnit || (req.body.expiresInHours !== undefined ? "hours" : "days")).toLowerCase();
   const isLifetime = expiresInUnit === "lifetime";
+  // Explicit unit table. The previous form was `expiresIn * (unit === "hours" ? 1 : 24)`, so ANY
+  // unrecognised unit silently became DAYS -- a typo like "minute" would have issued a 30-day key
+  // instead of a 30-minute one. Unknown units now fall back to days deliberately.
+  const UNIT_TO_HOURS = {
+    minutes: 1 / 60, minute: 1 / 60, min: 1 / 60, m: 1 / 60,
+    hours: 1, hour: 1, h: 1,
+    days: 24, day: 24, d: 24,
+    weeks: 24 * 7, week: 24 * 7, w: 24 * 7,
+  };
+  const unitHours = UNIT_TO_HOURS[expiresInUnit];
   const expiresInHours = req.body.expiresInHours !== undefined
     ? Math.max(0, Number(req.body.expiresInHours || 0))
-    : expiresIn * (expiresInUnit === "hours" ? 1 : 24);
+    : expiresIn * (unitHours !== undefined ? unitHours : 24);
+  // Minutes are the smallest unit the dashboard offers. Reported back so the response and the key
+  // list can show "45m" rather than rounding it away to "1h".
+  const expiresAfterMinutes = !isLifetime && expiresInHours > 0
+    ? Math.round(expiresInHours * 60)
+    : null;
   const maxDevices = Math.max(1, Number(req.body.maxUses || req.body.maxDevices || 1));
   const notes = String(req.body.notes || "").slice(0, 500);
   const adminActor = normalizeAdminActor(req);
@@ -1282,6 +1308,7 @@ app.post("/api/generate-key", requireAdmin, asyncHandler(async (req, res) => {
       key: keyCode,
       expiresAt: null,
       expiresAfterHours,
+      expiresAfterMinutes,
       maxUses: maxDevices,
       scriptUrl,
       loadstring: buildLoadstring(getPublicBaseUrl(req), keyCode),

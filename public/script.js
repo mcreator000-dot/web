@@ -135,6 +135,12 @@ function formatExpires(value) {
 function formatDuration(hours) {
   const totalHours = Number(hours || 0);
   if (!Number.isFinite(totalHours) || totalHours <= 0) return "Never";
+  // Sub-hour durations are now creatable (the unit selector offers Minutes), so show them as
+  // minutes instead of rounding 0.75 hr up to "1 hr".
+  if (totalHours < 1) {
+    const mins = Math.max(1, Math.round(totalHours * 60));
+    return `${mins} min${mins === 1 ? "" : "s"}`;
+  }
   if (totalHours < 24) return `${Math.ceil(totalHours)} hr${Math.ceil(totalHours) === 1 ? "" : "s"}`;
   const days = Math.ceil(totalHours / 24);
   return `${days} day${days === 1 ? "" : "s"}`;
