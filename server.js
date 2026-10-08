@@ -427,6 +427,95 @@ async function deleteExpiredKeys() {
   return deletingExpiredKeys;
 }
 
+// Burner / time-limited keys that stop being EXECUTED are removed after a grace period.
+//
+// A "burner" here is any key that is not lifetime, i.e. it has expires_after_hours set and
+// expires_at NULL until first activation (the same discriminator generate-key uses). Lifetime
+// keys (expires_after_hours NULL) are never touched by this sweep.
+//
+// "Inactive" means never executed inside the window, not never validated-in-theory: activity is
+// MAX(key_devices.last_validated_at), which /api/loader and /api/validate-key both bump on every
+// run. A key that was generated but never activated has no device row at all, so it falls back to
+// created_at and expires from the shelf after the same grace period.
+//
+// Paused keys are deliberately excluded so that pausing a licence does not delete it.
+const BURNER_INACTIVE_DAYS = Number(process.env.BURNER_INACTIVE_DAYS || 3);
+const AUTO_DELETE_STALE_BURNERS = process.env.AUTO_DELETE_STALE_BURNERS !== "false";
+const STALE_SWEEP_INTERVAL_MS = Number(process.env.STALE_SWEEP_INTERVAL_MS || 30 * 60 * 1000);
+let deletingStaleBurners = null;
+let lastStaleSweep = 0;
+
+async function deleteStaleBurnerKeys(force = false) {
+  if (!AUTO_DELETE_STALE_BURNERS) {
+    return { changes: 0, skipped: "disabled" };
+  }
+
+  if (!Number.isFinite(BURNER_INACTIVE_DAYS) || BURNER_INACTIVE_DAYS <= 0) {
+    return { changes: 0, skipped: "bad_window" };
+  }
+
+  const now = Date.now();
+  if (!force && now - lastStaleSweep < STALE_SWEEP_INTERVAL_MS) {
+    return { changes: 0, skipped: "throttled" };
+  }
+
+  if (deletingStaleBurners) {
+    return deletingStaleBurners;
+  }
+
+  const cutoff = new Date(now - BURNER_INACTIVE_DAYS * 24 * 60 * 60 * 1000).toISOString();
+
+  // LIFETIME KEYS ARE NEVER SWEPT. The discriminator is expires_after_hours, and it is exact:
+  //   - generate-key sets expiresAfterHours = null when expiresInUnit === "lifetime"
+  //   - getDiscordPlanDuration() maps the lifetime plan to null
+  //   - the Discord licence insert uses that same null
+  // so every lifetime key stores NULL here, regardless of activity or execution count.
+  //
+  // Do NOT also require expires_at IS NOT NULL. That column is inserted as null for EVERY key and
+  // is only filled in by startKeyTimerOnBind() on first activation, so a burner that was generated
+  // and never executed has expires_at = NULL by design -- requiring it silently disabled the
+  // shelf-expiry path that removes unactivated burners.
+  //
+  // Qualifying keys are then inactive by one of two routes:
+  //   - it has device rows, and the newest execution is older than the cutoff  (executed, then lapsed)
+  //   - it has no device rows at all, and it was created before the cutoff      (generated, never used)
+  // Paused keys are excluded so pausing a licence never deletes it.
+  const sql = `
+    DELETE FROM license_keys
+    WHERE expires_after_hours IS NOT NULL
+      AND COALESCE(expires_after_hours, 0) > 0
+      AND paused_at IS NULL
+      AND (
+        EXISTS (
+          SELECT 1 FROM key_devices kd
+          WHERE kd.key_id = license_keys.id
+          GROUP BY kd.key_id
+          HAVING MAX(kd.last_validated_at) < ?
+        )
+        OR (
+          NOT EXISTS (SELECT 1 FROM key_devices kd2 WHERE kd2.key_id = license_keys.id)
+          AND created_at < ?
+        )
+      )`;
+
+  deletingStaleBurners = run(sql, [cutoff, cutoff])
+    .then((result) => {
+      const changes = Number(result.changes || 0);
+      if (changes > 0) {
+        console.log(
+          `[cleanup] removed ${changes} stale burner key(s): no execution in ${BURNER_INACTIVE_DAYS} day(s)`
+        );
+      }
+      lastStaleSweep = Date.now();
+      return { changes, cutoff, days: BURNER_INACTIVE_DAYS };
+    })
+    .finally(() => {
+      deletingStaleBurners = null;
+    });
+
+  return deletingStaleBurners;
+}
+
 function ensureDbReady() {
   if (!dbReady || dbInitFailed) {
     dbInitFailed = false;
@@ -1149,6 +1238,7 @@ app.use((req, res, next) => {
 
   return ensureDbReady()
     .then(() => deleteExpiredKeys())
+    .then(() => deleteStaleBurnerKeys())
     .then(() => next())
     .catch(next);
 });
