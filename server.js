@@ -111,6 +111,63 @@ const adminLimiter = rateLimit({
 });
 
 app.use("/api/validate-key", validateLimiter);
+
+// SECURITY: signed key-validation responses.
+// The client refuses a success body it cannot prove came from this server, so a hooked
+// `request` returning {"success":true} no longer unlocks anything.
+function responseSigningSecret() {
+  return (
+    process.env.KEY_RESPONSE_SIGNING_SECRET ||
+    process.env.DEVICE_HASH_SECRET ||
+    ""
+  );
+}
+
+// Must stay byte-identical to _SEC.canonical() in the Lua client. Field order is the contract.
+function canonicalValidatePayload(d) {
+  return [
+    "v1",
+    d.success === true ? "true" : "false",
+    String(d.nonce || ""),
+    String(d.deviceHash || ""),
+    String(d.product || ""),
+    String(d.status || ""),
+    String(d.expiresAt || ""),
+    String(d.serverTime || ""),
+  ].join("|");
+}
+
+function signValidateResponse(payload) {
+  const secret = responseSigningSecret();
+  if (!secret) return null;
+  return crypto
+    .createHmac("sha256", secret)
+    .update(canonicalValidatePayload(payload))
+    .digest("hex");
+}
+
+function hashDeviceIdRaw(deviceId) {
+  return crypto
+    .createHmac("sha256", DEVICE_HASH_SECRET)
+    .update(String(deviceId))
+    .digest("hex");
+}
+
+// Replay guard. An attacker who captured one valid response must not be able to replay it to a
+// fresh client, so a nonce is single-use within a short window.
+const usedNonces = new Map();
+function claimNonce(nonce) {
+  if (!nonce) return true; // legacy client; strict mode handles the refusal
+  const now = Date.now();
+  for (const [k, t] of usedNonces) {
+    if (now - t > 5 * 60 * 1000) usedNonces.delete(k);
+  }
+  if (usedNonces.has(nonce)) return false;
+  usedNonces.set(nonce, now);
+  return true;
+}
+
+const KEY_SIG_STRICT = process.env.KEY_SIG_STRICT === "1" || process.env.KEY_SIG_STRICT === "true";
 app.use("/api/loader", validateLimiter);
 app.use("/api", adminLimiter);
 
@@ -1151,19 +1208,43 @@ app.post("/api/validate-key", asyncHandler(async (req, res) => {
   const product = req.body.product;
   const ip = req.ip;
 
+  // Client challenge, echoed back inside the signed payload. A response for a different request
+  // cannot be substituted because the nonce is covered by the signature.
+  const nonce = req.body && req.body.nonce ? String(req.body.nonce).slice(0, 128) : null;
+  if (nonce && !claimNonce(nonce)) {
+    return jsonError(res, 409, "Replayed validation request", "replayed");
+  }
+
   const result = await validateKeyForDevice({ keyCode, deviceId, userId, ip, product });
   if (!result.ok) {
     return jsonError(res, result.status, result.message, result.code);
   }
 
-  return res.json({
+  const payload = {
     success: true,
     message: result.isNew ? "Key activated successfully" : "Key validated successfully",
     status: result.statusText,
     isNew: result.isNew,
-    expiresAt: result.keyRow.expires_at,
+    expiresAt: result.keyRow.expires_at || null,
+    expiresAfterHours: result.keyRow.expires_after_hours || null,
+    nonce,
+    // Echoed so the client can bind the signature to the exact device it authenticated with.
+    deviceHash: deviceId ? hashDeviceIdRaw(deviceId) : null,
+    product: result.keyRow.product || null,
     serverTime: new Date().toISOString(),
-  });
+  };
+
+  const sig = signValidateResponse(payload);
+  if (!sig) {
+    if (KEY_SIG_STRICT) {
+      return jsonError(res, 500, "Response signing is not configured", "no_signing_secret");
+    }
+    console.warn("[validate-key] KEY_RESPONSE_SIGNING_SECRET is not set - response left unsigned");
+  } else {
+    payload.sig = sig;
+  }
+
+  return res.json(payload);
 }));
 
 app.get("/api/loader", (req, res) => {
