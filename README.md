@@ -4,7 +4,7 @@ Node.js and Express license-key backend with a small admin dashboard and a two-s
 
 It uses SQLite for local development. On Vercel, set `DATABASE_URL` and it will use Postgres instead.
 
-This service validates licenses, binds them to device identifiers, and can return the script content attached to a key through the loader endpoint.
+This service validates licenses, binds them to device identifiers, signs its validation responses, sweeps abandoned burner keys, and can return the script content attached to a key through the loader endpoint.
 
 ## Setup
 
@@ -14,7 +14,7 @@ npm install
 Copy-Item .env.example .env
 ```
 
-Edit `.env` and set long random values for `ADMIN_TOKEN` and `DEVICE_HASH_SECRET`.
+Edit `.env` and set long random values for `ADMIN_TOKEN`, `DEVICE_HASH_SECRET`, and `KEY_RESPONSE_SIGNING_SECRET`.
 
 ## Run
 
@@ -42,6 +42,11 @@ PAYMENT_PROVIDER=manual
 PURCHASE_ORDER_SECRET=replace-with-a-long-random-purchase-order-secret
 ELDORADO_API_KEY=
 DEVICE_HASH_SECRET=replace-with-a-long-random-device-secret
+KEY_RESPONSE_SIGNING_SECRET=replace-with-a-different-long-random-secret
+KEY_SIG_STRICT=0
+BURNER_INACTIVE_DAYS=3
+AUTO_DELETE_STALE_BURNERS=true
+STALE_SWEEP_INTERVAL_MS=1800000
 CORS_ORIGIN=https://your-project.vercel.app
 PUBLIC_BASE_URL=https://your-project.vercel.app
 DEFAULT_SCRIPT_URL=https://your-domain.example/main.lua
@@ -72,6 +77,11 @@ npx vercel env add DISCORD_BOT_API_TOKEN production
 npx vercel env add PAYMENT_PROVIDER production
 npx vercel env add PURCHASE_ORDER_SECRET production
 npx vercel env add DEVICE_HASH_SECRET production
+npx vercel env add KEY_RESPONSE_SIGNING_SECRET production
+npx vercel env add KEY_SIG_STRICT production
+npx vercel env add BURNER_INACTIVE_DAYS production
+npx vercel env add AUTO_DELETE_STALE_BURNERS production
+npx vercel env add STALE_SWEEP_INTERVAL_MS production
 npx vercel env add CORS_ORIGIN production
 npx vercel env add PUBLIC_BASE_URL production
 npx vercel env add DEFAULT_SCRIPT_URL production
@@ -84,6 +94,18 @@ npx vercel env add PGSSLMODE production
 npx vercel --prod
 ```
 
+### Generating secrets
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+PowerShell equivalent:
+
+```powershell
+[guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
+```
+
 ## API
 
 Admin endpoints accept the token in either the `X-Admin-Token` header or the legacy `adminToken` JSON body field.
@@ -92,7 +114,7 @@ Logging in with `GHOST_T_ADMIN_TOKEN` opens a separate Ghost T dashboard. Loggin
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /api/generate-key` | Create a new key and return its loadstring |
-| `POST /api/validate-key` | Validate or activate a key for a device |
+| `POST /api/validate-key` | Validate or activate a key for a device, returning a signed response |
 | `GET /api/loader` | Return the Lua loader used by generated loadstrings |
 | `POST /api/loader` | Validate a key/device and return raw attached script content |
 | `POST /api/reset-hwid` | Reset a key binding, optionally for one device |
@@ -116,11 +138,80 @@ Use a device identifier that your own app is allowed to collect. The backend sto
 {
   "key": "KEY-ABCD-EFGH-JKLM-NPQR",
   "deviceId": "your-device-id",
-  "userId": "optional-user-id"
+  "userId": "optional-user-id",
+  "nonce": "optional-client-challenge"
 }
 ```
 
 Successful responses return `status: "activated"` for a first use on a device and `status: "validated"` for later checks.
+
+## Signed Validation Responses
+
+`POST /api/validate-key` signs its success payload so a client can prove the reply came from this server and was produced for the request it actually sent. Without this, a tampered client only has to fake `{"success":true}` to bypass a client-side gate.
+
+Signed responses add `sig` and echo `nonce`, `deviceHash`, `product`, and `expiresAfterHours`.
+
+### The canonical string is a contract
+
+`sig` is `HMAC-SHA256(KEY_RESPONSE_SIGNING_SECRET, canonical)` in lowercase hex, where `canonical` is these fields joined by `|` in exactly this order:
+
+```text
+v1|<success as "true"/"false">|<nonce>|<deviceHash>|<product>|<status>|<expiresAt>|<serverTime>
+```
+
+Empty/absent values become empty strings. Example:
+
+```text
+v1|true|abc123|9f2c...|default|validated|2026-11-01T00:00:00.000Z|2026-10-08T10:00:00.000Z
+```
+
+If you change the order, the field set, or the `v1` prefix here, you must change it in the Lua client's `_SEC.canonical()` in the same release. A mismatch makes every legitimate validation fail.
+
+Verify a real response with plain Node:
+
+```bash
+node -e '
+const crypto=require("crypto"),secret=process.env.KEY_RESPONSE_SIGNING_SECRET;
+const d=JSON.parse(process.argv[1]);
+const canon=["v1",d.success===true?"true":"false",String(d.nonce||""),String(d.deviceHash||""),
+  String(d.product||""),String(d.status||""),String(d.expiresAt||""),String(d.serverTime||"")].join("|");
+console.log("expected:",crypto.createHmac("sha256",secret).update(canon).digest("hex"));
+console.log("received:",d.sig);
+' "$(curl -s -X POST https://your-project.vercel.app/api/validate-key \
+  -H 'Content-Type: application/json' \
+  -d '{\"key\":\"KEY-...\",\"deviceId\":\"dev\",\"nonce\":\"abc123\"}')"
+```
+
+### Anti-replay
+
+The client sends a random `nonce`; the server echoes it inside the signed payload and remembers it for 5 minutes. A replayed request is rejected with HTTP 409 `replayed`. A response captured for one request therefore cannot be replayed to another.
+
+### Rollout: do not enable strict mode first
+
+`KEY_RESPONSE_SIGNING_SECRET` is required before signature checking does anything.
+
+- No secret set: responses are **unsigned**, the server logs a warning, and clients still work. The client warns `key server sent an UNSIGNED response - deploy the signing patch`.
+- Secret set: responses are signed and clients verify them.
+- `KEY_SIG_STRICT=1`: a missing secret becomes a hard HTTP 500 instead of a silent unsigned fallback. Enable this only **after** every deployed client verifies signatures, otherwise older or un-updated clients break.
+
+Rotating `KEY_RESPONSE_SIGNING_SECRET` invalidates any client build whose secret has been extracted, but you must ship an updated client in the same window.
+
+## Burner Key Cleanup
+
+Time-limited keys that stop being **executed** are deleted automatically. Lifetime keys are never touched by this sweep.
+
+- A "burner" is any key that is not lifetime, i.e. `expires_after_hours` is set. That column is the exact discriminator: `POST /api/generate-key` writes `null` for `expiresInUnit: "lifetime"`, and `getDiscordPlanDuration()` maps the lifetime plan to `null`, so every lifetime key stores `NULL` there.
+- "Inactive" means not executed within the window. Activity is `MAX(key_devices.last_validated_at)`, which `/api/loader` and `/api/validate-key` both bump on every run.
+- A key that was generated but never activated has no device row at all, so it ages out from `created_at` after the same window.
+- Paused keys (`paused_at` set) are excluded, so pausing a licence never deletes it.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `BURNER_INACTIVE_DAYS` | `3` | Grace period with no execution before a burner is removed |
+| `AUTO_DELETE_STALE_BURNERS` | `true` | Set to `false` to disable the sweep entirely |
+| `STALE_SWEEP_INTERVAL_MS` | `1800000` | Minimum gap between sweeps (30 min). The sweep runs inside the existing request path, so no cron is needed on Vercel |
+
+Do **not** add an `expires_at IS NOT NULL` condition to this query. `expires_at` is `NULL` for every key until first activation, so requiring it silently disables removal of never-used burners.
 
 ## Loader Flow
 
@@ -134,7 +225,19 @@ The loadstring downloads the Lua loader from `GET /api/loader`. The loader posts
 
 For large obfuscated scripts, the loader tries a file-backed execution path first (`writefile` + `loadfile`) when the executor supports it, then falls back to `loadstring`.
 
+Because the loader re-validates on every fetch, the server is the real enforcement point. Client-side checks are defence in depth, not the gate.
+
 The dashboard shows execution IPs from active device bindings. `activation_ip` is the first IP that bound the key to that device, and `last_ip` is updated each time the key validates or the loader returns script content. IP changes are tracked for audit visibility but do not invalidate an already-bound device.
+
+### Script size limit
+
+`MAX_SCRIPT_BYTES` defaults to 5 MiB and is enforced when the loader fetches your script. A heavily obfuscated Lua script grows a lot (Luraph-style virtualisation commonly lands at 3-8x the source size), so raise this before shipping an obfuscated build, for example:
+
+```text
+MAX_SCRIPT_BYTES=12582912
+```
+
+If the script exceeds the limit the loader refuses to serve it, which looks like a key problem rather than a size problem. Check the obfuscated artifact's byte size before publishing.
 
 `POST /api/generate-key` accepts:
 
@@ -278,4 +381,15 @@ The Discord bot flow should be:
 - Set `SCRIPT_URL_ALLOWLIST` to a comma-separated list of allowed script hostnames so new keys cannot point at arbitrary domains.
 - Loader and script responses are marked `Cache-Control: no-store`.
 - The server stores HMAC hashes of device IDs, not raw device IDs.
-- A hostile client can still inspect any script that is delivered to it. Obfuscation, server-side checks, and fast revocation help, but no client-delivered Lua can be made impossible to copy.
+- Validation responses are HMAC-signed and nonce-bound. See [Signed Validation Responses](#signed-validation-responses).
+- `KEY_RESPONSE_SIGNING_SECRET` must differ from `DEVICE_HASH_SECRET`. The server falls back to `DEVICE_HASH_SECRET` only so a fresh deployment works; set a separate value.
+- Every `/api/validate-key` request is rate limited to 60 per minute per IP, and `/api` admin routes to 120 per minute.
+- Never commit `.env`. It is git-ignored, but confirm before pushing.
+
+### What this design does and does not guarantee
+
+Server-side enforcement is the real gate: `/api/loader` re-validates the key on every fetch, so a patched client still cannot obtain the script without a valid, active, device-bound key.
+
+Client-side hardening (obfuscation, signed-response verification, integrity checks) raises the cost of cracking a delivered client but cannot make it impossible. A determined reverser controls the execution environment and can instrument any code handed to it. Treat client protections as defence in depth, and keep anything that must stay secret on the server.
+
+Finally: a hostile client can inspect any script that is delivered to it. Obfuscation, server-side checks, and fast revocation help, but no client-delivered Lua can be made impossible to copy.
