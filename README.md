@@ -167,6 +167,34 @@ v1|true|abc123|9f2c...|default|validated|2026-11-01T00:00:00.000Z|2026-10-08T10:
 
 If you change the order, the field set, or the `v1` prefix here, you must change it in the Lua client's `_SEC.canonical()` in the same release. A mismatch makes every legitimate validation fail.
 
+### The client must be told the same secret
+
+A client can only verify a signature if it holds the same secret. The Lua client reads it at
+runtime, before the protected script runs:
+
+```lua
+getgenv().GHOST_KEY_SIGNING_SECRET = "<the same value as KEY_RESPONSE_SIGNING_SECRET>"
+```
+
+Behaviour, and why it is shaped this way:
+
+| Server | Client | Outcome |
+| --- | --- | --- |
+| No secret set | anything | Unsigned response, allowed, client warns |
+| Signed | `GHOST_KEY_SIGNING_SECRET` matches | Verified, allowed |
+| Signed | secret missing or different | **Allowed with a warning** — never a lockout |
+| Signed | signature does not match the body | **Rejected** |
+
+An earlier iteration returned a hard failure when the secret was missing or different. That locked
+every user out with `Key server response failed verification` the moment the server was configured
+and the client was not, so mismatches now warn and pass while genuine tampering still fails.
+
+Be clear about the ceiling: the value above ships inside the client, so a determined reverser can
+extract it and then mint valid-looking responses. Client-side verification stops naive response
+injection (the classic `return {Body='{"success":true}'}` hook) and nothing more. The boundary that
+does not depend on the client is server-side enforcement — `/api/loader` re-validating the key on
+every fetch — plus the obfuscation of the delivered script.
+
 Verify a real response with plain Node:
 
 ```bash
